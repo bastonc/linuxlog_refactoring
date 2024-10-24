@@ -14,7 +14,9 @@ class Test_initialisation_DB(QObject):
         super().__init__()
 
         print("Run Test")
-        self.test_db = DB_driver.DriverDB("UR4LGA", "UR4LGA")
+        self.settings_dict = {"db-user": "linuxlog", "db-pass": "Linuxlog12#", "db-host": "localhost",
+                              "db-name": "linuxlog"}
+        self.test_db = DB_driver.DriverDB("UR4LGA_TEST", "UR4LGA", self.settings_dict)
         self.test_db.connecting_ok_signal.connect(self.connecting_ok)
         self.test_db.connecting_error_signal.connect(self.connecting_error)
         self.test_db.init_connection()

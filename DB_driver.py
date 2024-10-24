@@ -14,24 +14,37 @@ class DriverDB(QObject):
     If connecting to db is correctly and active then emit signal conecting_ok_signal
     If error connection to db - emit signal connecting_error_signal
 
-    """
-    connecting_ok_signal = QtCore.Signal(object, name="connecting_ok_signal")
-    connecting_error_signal = QtCore.Signal(object)
+    Using
+    After get instance need connect signals
+    connecting_ok_signal (it signal using for start other component of log)
+    connecting_error_signal
+    error_signal
 
-    def __init__(self, callsign, operator):
+    """
+    connecting_ok_signal = QtCore.Signal(object)
+    connecting_error_signal = QtCore.Signal(object)
+    error_signal = QtCore.Signal(object)
+
+    def __init__(self, callsign, operator, settings_dict):
         super().__init__()
         self.callsign = callsign
         self.operator = operator
-        self.db_user = "linuxlog"
-        self.db_pass = "Linuxlog12#"
-        self.db_host = "localhost"
-        self.database = "linuxlog"
-        #self.connecting_ok_signal.connect(self.test_ok_slot)
+        self.settings_dict = settings_dict
+        self.db_user = self.settings_dict["db-user"]
+        self.db_pass = self.settings_dict["db-pass"]
+        self.db_host = self.settings_dict["db-host"]
+        self.database = self.settings_dict["db-name"]
+        self.db_fields = None
+        self.connecting_ok_signal.connect(self.start_after_connect)
 
         class Answer:
             status = None
             message = None
         self.__answer = Answer()
+
+    @Slot(object)
+    def start_after_connect(self, arg):
+        self.get_fields_of_table()
 
     def init_connection(self):
         self.init_db()
@@ -51,31 +64,52 @@ class DriverDB(QObject):
             print("ERROR: Connecting to database inactive. Check data connection (user, password, host, database name)")
             self.connecting_error_signal.emit(self.__answer)
 
-    def run(self):
-        print("test")
+    def get_fields_of_table(self):
+        query = "describe UR4LGA_TEST"
+        cursor = self.connecting.cursor()
+        cursor.execute(query)
+        self.db_fields = cursor.fetchall()
 
     def close_db(self):
         self.connecting.close()
 
+    def db_out_to_dict(self, tuple_from_db):
+        out_dict = {}
+        for index, field in enumerate(self.db_fields):
+            out_dict.update({field[0]: tuple_from_db[index]})
+        return out_dict
 
-    def search_by_call(self, call):
-        ...
-
-    def get_all_qso(self):
-        output_data = None
-        cursor = self.connecting.cursor()
-        query = (f"SELECT * FROM {self.callsign};")
+    def commit_to_base(self, query):
         try:
+            cursor = self.connecting.cursor()
             cursor.execute(query)
+            answer = cursor.fetchall()
             self.__answer.status = "OK"
-            self.__answer.message = cursor.fetchall()
+            self.__answer.message = answer
             cursor.close()
         except mysql.connector.errors.ProgrammingError:
             self.__answer.status = "ERROR"
             self.__answer.message = f"Error Connecting to Table {self.callsign} Check it field"
-        output_data = self.__answer
-        return output_data
+        return self.__answer
 
+#### User functions
+    def search_by_call(self, call):
+        ...
+
+    def get_all_qso(self):
+        encode_out_list = []
+        query = (f"SELECT * FROM {self.callsign};")
+        raw_data = self.commit_to_base(query)
+        if raw_data.status == "OK":
+            for qso in raw_data.message:
+                encode_out_list.append(self.db_out_to_dict(qso))
+            self.__answer.status = "OK"
+            self.__answer.message = encode_out_list
+        else:
+            self.__answer.status = "ERROR"
+            self.__answer.message = f"ERROR: Incorrect query to db -> {raw_data.message}"
+
+        return self.__answer
 
 
 
