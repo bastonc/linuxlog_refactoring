@@ -531,8 +531,8 @@ class Log_Window_2(QWidget):
                          int(settingsDict['log-window-height']))
 
 
-        self.setWindowTitle('LinuxLog | All QSO')
-        self.setWindowIcon(QIcon('logo.png'))
+        self.setWindowTitle("General log")
+        self.setWindowIcon(QIcon(f'{Path(__file__).parent }/logo.png'))
         if settingsDict['border_wnd'] == "disable":
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowOpacity(float(settingsDict['logWindow-opacity']))
@@ -1591,8 +1591,8 @@ class LogSearch(QWidget):
 
         self.setGeometry(int(settingsDict['log-search-window-left']), int(settingsDict['log-search-window-top']),
                          int(settingsDict['log-search-window-width']), int(settingsDict['log-search-window-height']))
-        self.setWindowTitle('LinuxLog | Search')
-        self.setWindowIcon(QIcon('logo.png'))
+        self.setWindowTitle('Repeats')
+        self.setWindowIcon(QIcon(f'{Path(__file__).parent}/logo.png'))
         if settingsDict['border_wnd'] == "disable":
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowOpacity(float(settingsDict['logSearch-opacity']))
@@ -1797,7 +1797,7 @@ class About_window(QWidget):
         self.setFixedWidth(320)
 
         self.setGeometry(int(width_coordinate), int(height_coordinate), 200, 300)
-        self.setWindowIcon(QIcon('logo.png'))
+        self.setWindowIcon(QIcon(f'{Path(__file__).parent }/logo.png'))
         self.setWindowTitle('About | LinuxLog')
         style = "QWidget{background-color:" + settingsDict['background-color'] + "; color:" + settingsDict['color'] + ";}"
         self.setStyleSheet(style)
@@ -1902,7 +1902,7 @@ class FreqWindow(QWidget):
                          200, int(self.settings_dict['log-form-window-height']))
         self.setFixedHeight(320)
         self.setWindowOpacity(float(self.settings_dict['freq-input-window-opacity']))
-        self.setWindowTitle('Frequency | LinLog')
+        self.setWindowTitle('Frequency')
         self.setStyleSheet(self.style_window)
         # Create elements
 
@@ -4540,7 +4540,6 @@ class InternetSearch(QWidget):
                          int(settingsDict['search-internet-top']),
                          int(settingsDict['search-internet-width']),
                          int(settingsDict['search-internet-height']))
-        self.setWindowTitle('Telnet cluster')
         self.setWindowIcon(QIcon(f"{Path(__file__).parent}/logo.png"))
         self.setWindowTitle('Image from internet')
         if settingsDict['border_wnd'] == "disable":
