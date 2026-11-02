@@ -1,5 +1,6 @@
-import std
 from PyQt6.QtCore import QObject
+
+
 class Kenwood(QObject):
     def __init__(self, settingsDict, parent_window, serial_port):
         super().__init__()
@@ -8,59 +9,43 @@ class Kenwood(QObject):
         self.ser = serial_port
 
     def get_freq_mod_list(self):
-        list = [b"FA;", b"MD;"]
-        return list
+        return [b"FA;", b"MD;"]
+
     def decoder_data(self, data_byte: bytes):
-        freq_str = data_byte.decode("utf-8").replace(';', '')
-        if freq_str[:2] == "FA" and len(freq_str) <= 14:
-            freq = freq_str.replace('FA', '')
-            self.parent_window.set_freq(freq.lstrip('0'))
-            #print("Frequency:_>", freq_str)
-        elif freq_str[:2] == "MD":
-            if freq_str[2:] == '1':
-                self.parent_window.set_mode_tci("lsb")
-            if freq_str[2:] == '2':
-                self.parent_window.set_mode_tci("usb")
-            if freq_str[2:] == '3':
-                self.parent_window.set_mode_tci("cw")
-            if freq_str[2:] == '4':
-                self.parent_window.set_mode_tci("nfm")
-            if freq_str[2:] == '5':
-                self.parent_window.set_mode_tci("am")
-            if freq_str[2:] == '6':
-                self.parent_window.set_mode_tci("digl")
-            if freq_str[2:] == '7':
-                self.parent_window.set_mode_tci("cw")
-            if freq_str[2:] == '9':
-                self.parent_window.set_mode_tci("digu")
-        #print("Mode MD:_>", freq_str[2:])
+        try:
+            response = data_byte.decode("ascii").strip().rstrip(";")
+        except (AttributeError, UnicodeDecodeError):
+            return
+
+        if response.startswith("FA"):
+            frequency = response[2:]
+            if frequency.isdigit() and len(frequency) <= 11:
+                self.parent_window.set_freq(frequency.lstrip("0") or "0")
+            return
+
+        mode_by_code = {
+            "1": "lsb", "2": "usb", "3": "cw", "4": "nfm",
+            "5": "am", "6": "digl", "7": "cw", "9": "digu",
+        }
+        if response.startswith("MD"):
+            mode = mode_by_code.get(response[2:])
+            if mode:
+                self.parent_window.set_mode_tci(mode)
+
     def set_freq_rig(self, freq):
-        if len(freq) < 11:  # for cat len freq = 11 digit
-            freq = freq.zfill(11)  # add '0' before freq
-            # print("freq:_>", freq)
+        freq = str(freq)
+        if not freq.isdigit():
+            return
+        freq = freq.zfill(11)
         self.ser.write(b'FA' + freq.encode("utf-8") + b";")
+
     def set_mode_rig(self, mode):
-
-        if mode == 'LSB':
-            mode_bytes = b"MD1;"
-        elif mode == 'USB':
-            mode_bytes = b"MD2;"
-        elif mode == 'CW':
-            mode_bytes = b"MD3;"
-        elif mode == 'NFM':
-            mode_bytes = b"MD4;"
-        elif mode == 'AM':
-            mode_bytes = b"MD5;"
-        elif mode == 'DIGL':
-            mode_bytes = b"MD6;"
-        #if mode == 'CW':
-         #   mode_bytes = b"MD7;"
-        elif mode == 'DIGU':
-            mode_bytes = b"MD9;"
-        elif mode == 'ERROR':
-            mode_bytes = b"MD1;"
-
-        self.ser.write(mode_bytes)
+        mode_code = {
+            "LSB": "1", "USB": "2", "CW": "3", "NFM": "4",
+            "AM": "5", "DIGL": "6", "DIGU": "9", "ERROR": "1",
+        }.get(str(mode).upper())
+        if mode_code:
+            self.ser.write(f"MD{mode_code};".encode("ascii"))
 
 class Icom(QObject):
     def __init__(self, settingsDict, parent_window, serial_port):
@@ -70,37 +55,44 @@ class Icom(QObject):
         self.ser = serial_port
 
     def get_freq_mod_list(self):
-        list = [b"FEFE6C0003FD", b"FEFE6C0004FD"]  # 1-st bytecode for request frequency, 2-nd bytecode for request mode
-        return list
+        # First command requests frequency; second requests operating mode.
+        return [b"FEFE6C0003FD", b"FEFE6C0004FD"]
 
     def freq_to_bcd(self, i):
-        i = i.zfill(9)
-        out = r'\x' + i[8] + '2' + r'\x' + i[6] + i[7] + r'\x' + i[4] + i[5] + r'\x' + i[2] + i[3] + r'\x' + i[0] + i[1]
-        return out
+        frequency = str(i).strip()
+        if not frequency.isdigit() or len(frequency) > 10:
+            raise ValueError("Icom frequency must be an integer number of hertz")
+
+        digits = frequency.zfill(10)
+        # CI-V represents frequency as five packed-BCD bytes, least
+        # significant byte first. Return hex text because this CAT profile
+        # sends the command as an ASCII hexadecimal string.
+        return "".join(digits[index:index + 2] for index in range(8, -1, -2))
 
     def decoder_data(self, data_byte: bytes):
-        freq_str = data_byte.decode("utf-8").replace(';', '')
-        if freq_str[:4] == "FEFE" and len(freq_str) <= 14:
-            if freq_str[9:10] == '03':
-                freq_in_hex = freq_str[10:20]
-                freq = int(freq_in_hex, 16)
-            self.parent_window.set_freq(freq)
-            #print("Frequency:_>", freq_str)
-            if freq_str[9:10] == "06":
-                if freq_str[10:11] == '00':
-                    self.parent_window.set_mode_tci("lsb")
-                if freq_str[10:11] == '01':
-                    self.parent_window.set_mode_tci("usb")
-                if freq_str[10:11] == '03':
-                    self.parent_window.set_mode_tci("cw")
-                if freq_str[10:11] == '05':
-                    self.parent_window.set_mode_tci("nfm")
-                if freq_str[10:11] == '02':
-                    self.parent_window.set_mode_tci("am")
-                if freq_str[10:11] == '08' or freq_str[10:11] == '11' \
-                        or freq_str[10:11] == '12' or freq_str[10:11] == '04':
-                    self.parent_window.set_mode_tci("digl")
+        try:
+            response = data_byte.decode("ascii").strip().upper()
+        except (AttributeError, UnicodeDecodeError):
+            return
+        if not response.startswith("FEFE6C00") or not response.endswith("FD"):
+            return
 
+        command = response[8:10]
+        payload = response[10:-2]
+        if command == "03" and len(payload) == 10:
+            if not all(character in "0123456789" for character in payload):
+                return
+            frequency_digits = "".join(payload[index:index + 2] for index in range(8, -1, -2))
+            frequency = int(frequency_digits)
+            self.parent_window.set_freq(str(frequency))
+        elif command == "04" and len(payload) >= 2:
+            mode_by_code = {
+                "00": "lsb", "01": "usb", "03": "cw", "05": "nfm",
+                "02": "am", "08": "digl", "11": "digl", "12": "digl", "04": "digl",
+            }
+            mode = mode_by_code.get(payload[:2])
+            if mode:
+                self.parent_window.set_mode_tci(mode)
 
     def set_freq_rig(self, freq):
         freq_in_hex = self.freq_to_bcd(freq)
@@ -108,24 +100,9 @@ class Icom(QObject):
 
     def set_mode_rig(self, mode):
 
-        if mode == 'LSB':
-            mode_bytes = b"00"
-        elif mode == 'USB':
-            mode_bytes = b"01"
-        elif mode == 'CW':
-            mode_bytes = b"03"
-        elif mode == 'NFM':
-            mode_bytes = b"05"
-        elif mode == 'AM':
-            mode_bytes = b"02"
-        elif mode == 'DIGL':
-            mode_bytes = None
-        #if mode == 'CW':
-         #   mode_bytes = b"MD7;"
-        elif mode == 'DIGU':
-            mode_bytes = None
-        else:
-            mode_bytes = b"00"
-
-        if mode_bytes != None:
+        mode_bytes = {
+            "LSB": b"00", "USB": b"01", "CW": b"03",
+            "NFM": b"05", "AM": b"02",
+        }.get(str(mode).upper())
+        if mode_bytes is not None:
             self.ser.write(b"FEFE6C0004" + mode_bytes + b"FD")

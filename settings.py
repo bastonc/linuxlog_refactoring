@@ -1,9 +1,10 @@
-#import telnetlib
+import socket
 import time
 from pathlib import Path
 
 import main
 import internetworker
+import config_store
 import traceback
 import parse
 import shutil
@@ -26,6 +27,7 @@ class Menu (QWidget):
         super(Menu, self).__init__(parent)
         self.db_sql = db
         self.settingsDict = settingsDict
+        self._clublog_workers = {}
         self.label_style = "font: 12px;"
         self.initUI()
         self.initData()
@@ -1040,8 +1042,11 @@ class Menu (QWidget):
         self.fill_country()
 
     def closeEvent(self, e):
-        #print("Close menu", e)
-        self.close()
+        calibration_thread = getattr(self, "cluster", None)
+        if calibration_thread is not None and calibration_thread.isRunning():
+            calibration_thread.stop()
+            calibration_thread.wait(4000)
+        e.accept()
 
     def search_country(self):
         country = self.country_found.text().strip().lower()
@@ -1078,7 +1083,6 @@ class Menu (QWidget):
                 double_qso = []
                 bad_qso = []
                 allRecords = parse.getAllRecord(self.allCollumn, fname, key="import")
-                print(f"All records {allRecords}")
                 self.logWindow.load_bar.show()
                 all_records_count = len(allRecords)
                 for i, qso_in_file in enumerate(allRecords):
@@ -1132,28 +1136,69 @@ class Menu (QWidget):
             std.std.message(self, f"Export to\n{file_name}\n completed", "Export complited")
 
     def export_adi_clublog(self):
+        self.export_clublog_button.setEnabled(False)
+        clublog = internetworker.Clublog(settingsDict=self.settingsDict)
+        clublog.export_completed.connect(self._clublog_export_completed)
+        clublog.operation_error.connect(self._clublog_export_failed)
 
-        try:
-            clublog = internetworker.Clublog(settingsDict=self.settingsDict)
-            response = clublog.export_file("log.adi")
-            if response.status_code == 200:
-                print("response for Club log:_>", response, response.headers)
-                std.std.message(self, "Club log: "+response.content.decode(self.settingsDict['encodeStandart']), "Ok")
-            elif response.status_code == 403:
-                print("response for Club log:_>", response,  response.content)
-                std.std.message(self, "Club log: "+response.content.decode(self.settingsDict['encodeStandart'])+"\n", "ERROR")
-        except Exception:
-            std.std.message(self, "Check internet connection\n",
-                            "ERROR Club log")
+        thread = QThread(self)
+        clublog.moveToThread(thread)
+        clublog.export_requested.connect(clublog.export_file_async)
+        clublog.operation_finished.connect(thread.quit)
+        clublog.operation_finished.connect(clublog.deleteLater)
+        thread.started.connect(lambda worker=clublog: worker.export_requested.emit("log.adi"))
+        thread.finished.connect(self._enable_clublog_export)
+        thread.finished.connect(thread.deleteLater)
+        self._clublog_workers[thread] = clublog
+        thread.finished.connect(lambda thread=thread: self._clublog_workers.pop(thread, None))
+        thread.start()
+
+    @QtCore.pyqtSlot(object)
+    def _clublog_export_completed(self, response):
+        message = response.content.decode(self.settingsDict['encodeStandart'], errors='replace')
+        if response.status_code == 200:
+            std.std.message(self, "Club Log: " + message, "Export completed")
+        else:
+            std.std.message(self, "Club Log: " + message, "ERROR")
+
+    @QtCore.pyqtSlot(str)
+    def _clublog_export_failed(self, message):
+        std.std.message(self, message, "ERROR Club Log")
+
+    @QtCore.pyqtSlot()
+    def _enable_clublog_export(self):
+        self.export_clublog_button.setEnabled(True)
 
     def start_calibrate_cluster(self):
        # print("start_calibrate_cluster:_>", self.settingsDict)
-        self.telnetCluster.stop_cluster()
-        self.cluster = cluster_in_Thread (self.cluster_host_input.text().strip(),
+       self.telnetCluster.stop_cluster()
+       if hasattr(self, "cluster") and self.cluster.isRunning():
+           self.cluster.stop()
+           if not self.cluster.wait(4000):
+               std.std.message(self, "Cluster calibration is still stopping", "Telnet")
+               return
+       self.cluster = cluster_in_Thread (self.cluster_host_input.text().strip(),
                                           self.cluster_port_input.text().strip(),
                                           self.call_input.text().strip(),
                                           settingsDict=self.settingsDict, parent_window=self)
-        self.cluster.start()
+       self.cluster.calibration_result.connect(self.apply_cluster_calibration)
+       self.cluster.start()
+
+    @QtCore.pyqtSlot(object)
+    def apply_cluster_calibration(self, clean_list):
+        self.cluster_combo_call.clear()
+        self.cluster_combo_freq.clear()
+        for index, value in enumerate(clean_list):
+            option = f"{index}:{value}"
+            self.cluster_combo_call.addItem(option)
+            self.cluster_combo_freq.addItem(option)
+
+        call_index = int(self.settingsDict.get('telnet-call-position', 0))
+        freq_index = int(self.settingsDict.get('telnet-freq-position', 0))
+        self.cluster_combo_call.setCurrentIndex(call_index)
+        self.cluster_combo_freq.setCurrentIndex(freq_index)
+        self.line_text.setText(' '.join(clean_list))
+        self.telnetCluster.start_cluster()
 
     def refresh_interface(self):
         self.update_color_schemes()
@@ -1383,26 +1428,15 @@ class Menu (QWidget):
 
         cluster_change_flag = self.store_new_settingsDict()
         self.logForm.refresh_interface()
-        filename = 'settings.cfg'
-        with open(Path(__file__).parent/filename, 'r') as f:
-            old_data = f.readlines()
-        for index, line in enumerate(old_data):
-            key_from_line = line.split('=')[0]
-            #print ("key_from_line:",key_from_line)
-            for key in self.settingsDict:
-
-                if key_from_line == key:
-                    #print("key",key , "line", line)
-                    old_data[index] = key+"="+self.settingsDict[key]+"\n"
-        with open(Path(__file__).parent/filename, 'w') as f:
-            f.writelines(old_data)
-        #print ("Save_and_Exit_button: ", old_data)
+        config_store.update_settings(self.settingsDict)
         self.close()
 
     def cancel_button(self):
         self.close()
 
 class cluster_in_Thread(QThread):
+    calibration_result = QtCore.pyqtSignal(object)
+
     def __init__(self, host, port, call, parent_window, settingsDict, parent=None):
         super().__init__()
         self.settingsDict = settingsDict
@@ -1410,62 +1444,58 @@ class cluster_in_Thread(QThread):
         self.port = port
         self.call =call
         self.parent_window = parent_window
-        # self.run()
+        self._stop_requested = False
+        self._socket = None
+
+    def stop(self):
+        self._stop_requested = True
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
 
     def run(self):
-
-        while 1:
+        while not self._stop_requested:
             try:
-                telnetObj = telnetlib.Telnet(self.host, self.port)
+                self._socket = socket.create_connection((self.host, int(self.port)), timeout=3)
                 break
-            except:
-                time.sleep(3)
-                continue
+            except (OSError, ValueError, TypeError):
+                for _ in range(30):
+                    if self._stop_requested:
+                        return
+                    self.msleep(100)
 
-        lastRow = 0
-        message = (self.call + "\n").encode('ascii')
-        telnetObj.write(message)
-        message2 = (self.call + "\n").encode('ascii')
-        telnetObj.write(message2)
-        splitString = []
-        cleanList = []
-        output_data = ""
-        i = 0
-        #print('Starting Telnet cluster:', self.host, ':', self.port, '\nCall:', self.call, '\n\n')
-        while 1:
-            try:
-                output_data = telnetObj.read_some()
-            except:
-                continue
+        if self._stop_requested or self._socket is None:
+            return
 
-            if output_data != '':
+        try:
+            self._socket.settimeout(1)
+            login_message = (self.call + "\n").encode('ascii')
+            self._socket.sendall(login_message)
+            self._socket.sendall(login_message)
+            buffer = ""
+            while not self._stop_requested:
+                try:
+                    received = self._socket.recv(4096)
+                except socket.timeout:
+                    continue
+                if not received:
+                    break
 
-                    if output_data[0:2].decode(self.settingsDict['encodeStandart']) == "DX":
-                        splitString = output_data.decode(self.settingsDict['encodeStandart']).split(' ')
-                        count_chars = len(splitString)
-                        for i in range(count_chars):
-                            if splitString[i] != '':
-                                cleanList.append(splitString[i])
-                        break
-            time.sleep(0.3)
-        ##########
-
-        i = 0
-        for value in cleanList:
-            self.parent_window.cluster_combo_call.addItems([str(i) + ":" + value])
-            self.parent_window.cluster_combo_freq.addItems([str(i) + ":" + value])
-            i += 1
-
-        self.parent_window.cluster_combo_call.setCurrentIndex(int(self.settingsDict['telnet-call-position']))
-        self.parent_window.cluster_combo_freq.setCurrentIndex(int(self.settingsDict['telnet-freq-position']))
-        self.parent_window.line_text.setText(' '.join(cleanList))
-        self.parent_window.telnetCluster.start_cluster()
-
-        self.currentThread().exit()
-        self.currentThread().wait()
-
-
-
-
-
-
+                buffer += received.decode(self.settingsDict['encodeStandart'], errors="ignore")
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    spot = line.strip()
+                    if spot.startswith("DX") and spot.endswith("Z"):
+                        clean_list = spot.split()
+                        if clean_list:
+                            self.calibration_result.emit(clean_list)
+                            return
+        except (OSError, UnicodeError):
+            return
+        finally:
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None

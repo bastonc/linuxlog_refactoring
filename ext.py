@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 #from PyQt6 import QtCore
 import signal
+from collections import Counter
+from pathlib import Path
 
 
 from PyQt6 import QtCore
@@ -16,6 +18,22 @@ import json
 import main
 import std
 import os
+import tempfile
+
+
+def _award_path(filename):
+    """Resolve an award data filename inside the application directory."""
+    filename = str(filename or "").strip()
+    if (
+        not filename
+        or filename in {".", ".."}
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+        or any(ord(character) < 32 for character in filename)
+    ):
+        raise ValueError("Invalid award filename")
+    return Path(__file__).parent / filename
 
 
 class test:
@@ -40,14 +58,14 @@ class test:
 
 class Diplom_form(QWidget):
 
-    def __init__(self, settingsDict, log_form, adi_file, diplomname='', list_data=[]):
+    def __init__(self, settingsDict, log_form, adi_file, diplomname='', list_data=None):
         super().__init__()
         # print("Diplom_form(QWidget) init_")
         self.logForm = log_form
         self.diplomname = diplomname
         self.settingsDict = settingsDict
         self.adi = adi_file
-        self.list_data = list_data
+        self.list_data = list_data if list_data is not None else []
         self.initUI()
 
     def initUI(self):
@@ -245,97 +263,160 @@ class Diplom_form(QWidget):
 
     def save_diplom(self):
         list_to_json = []
-        settings_list = []
-        # Validate Line edit name of awards
-        flag = 0
-        if self.name_input.text().strip() != '':
-            flag = 1
-        else:
-            flag = 0
+        name_programm = self.name_input.text().strip()
+        try:
+            _award_path(f"{name_programm}.rules")
+            name_valid = bool(name_programm) and name_programm not in {".", ".."}
+        except ValueError:
+            name_valid = False
+        if not name_valid:
             self.name_input.setStyleSheet("border: 2px solid #DD5555;")
-        # Validate color button
-        if self.color_button.text() != 'Select color':
-            flag = 1
-        else:
-            flag = 0
+            std.std.message(self, "Invalid award name", "Enter a name without path separators.")
+            return
+
+        if self.color_button.text() == 'Select color':
             self.color_button.setStyleSheet("border: 2px solid #DD5555;")
-        # end validate
-        # logic of saving award data
-        if flag == 1:
-            name_programm = self.name_input.text().strip()
-            score_complite = self.score_input.text().strip()
-            repeats = self.repeat_combo.currentIndex()
-            only_band = self.only_bands.currentText()
-            count_sps = self.sps_table_widget.rowCount()
-            for row in range(count_sps):
-                score_sps = '0'
-                if self.sps_table_widget.item(row, 0) != None:
-                    if self.sps_table_widget.item(row, 1) != None:
-                        if self.sps_table_widget.item(row, 1).text().isnumeric():
-                            score_sps = str(self.sps_table_widget.item(row, 1).text())
-                    print('Item content call', self.sps_table_widget.item(row, 0).text())
-                    list_to_json.append({'call': self.sps_table_widget.item(row, 0).text().upper(),
-                                         'score': score_sps,
-                                         'mode': self.combo_mode_list[row]['combo' + str(row)].currentText(),
-                                         'name': name_programm,
-                                         'colorR': self.colorR,
-                                         'colorG': self.colorG,
-                                         'colorB': self.colorB,
-                                         'color_name': self.color_name,
-                                         'repeats': repeats,
-                                         'only_bands_enable': self.only_bands_checkable.isChecked(),
-                                         'only_bands': self.only_bands.currentText(),
-                                         'score_complite': score_complite,
-                                         'prefix': self.prefix_check_box.isChecked()
-                                         })
+            std.std.message(self, "Select award color", "Choose a color for this award before saving.")
+            return
+
+        settings_text = self.settingsDict.get('diploms-json', '')
+        try:
+            settings_list = json.loads(settings_text) if settings_text else []
+        except json.JSONDecodeError:
+            std.std.message(self, "Invalid award settings", "The saved award list is not valid JSON.")
+            return
+        if not isinstance(settings_list, list):
+            std.std.message(self, "Invalid award settings", "The saved award list must be a list.")
+            return
+
+        old_name = self.diplomname.strip()
+        if old_name:
+            try:
+                _award_path(f"{old_name}.rules")
+            except ValueError:
+                std.std.message(self, "Invalid saved award name", "The existing award name cannot be used as a file path.")
+                return
+        if any(not isinstance(item, dict) for item in settings_list):
+            std.std.message(self, "Invalid award settings", "Each saved award entry must be an object.")
+            return
+        existing_names = [str(item.get('name_programm', '')) for item in settings_list]
+        if old_name and old_name not in existing_names:
+            std.std.message(self, "Award not found", "The award being edited is no longer in the saved list.")
+            return
+        if any(name == name_programm for name in existing_names if name != old_name):
+            std.std.message(self, "Programm with that name already exists", "Repeats")
+            return
+
+        old_rules = _award_path(f"{old_name}.rules") if old_name else None
+        old_adi = _award_path(f"{old_name}.adi") if old_name else None
+        new_rules = _award_path(f"{name_programm}.rules")
+        new_adi = _award_path(f"{name_programm}.adi")
+        is_new_award = not old_name
+        if is_new_award and (new_rules.exists() or new_adi.exists()):
+            std.std.message(self, "Award files already exist", "Choose another name to avoid replacing existing data.")
+            return
+        if old_name and name_programm != old_name and (new_rules.exists() or new_adi.exists()):
+            std.std.message(self, "Award files already exist", "Choose another name to avoid replacing existing data.")
+            return
+
+        score_complete = self.score_input.text().strip()
+        if not score_complete.isascii() or not score_complete.isdigit():
+            self.score_input.setStyleSheet("border: 2px solid #DD5555;")
+            std.std.message(self, "Invalid completion score", "Enter a non-negative whole number.")
+            return
+
+        repeats = self.repeat_combo.currentIndex()
+        for row in range(self.sps_table_widget.rowCount()):
+            call_item = self.sps_table_widget.item(row, 0)
+            if call_item is None or not call_item.text().strip():
+                continue
+            score_item = self.sps_table_widget.item(row, 1)
+            score = score_item.text().strip() if score_item else ""
+            if score and (not score.isascii() or not score.isdigit()):
+                score_item.setStyleSheet("border: 2px solid #DD5555;")
+                std.std.message(self, "Invalid award score", "Use ASCII digits for each callsign's score.")
+                return
+            score = score or "0"
+            list_to_json.append({
+                'call': call_item.text().strip().upper(),
+                'score': score,
+                'mode': self.combo_mode_list[row]['combo' + str(row)].currentText(),
+                'name': name_programm,
+                'colorR': self.colorR,
+                'colorG': self.colorG,
+                'colorB': self.colorB,
+                'color_name': self.color_name,
+                'repeats': repeats,
+                'only_bands_enable': self.only_bands_checkable.isChecked(),
+                'only_bands': self.only_bands.currentText(),
+                'score_complite': score_complete,
+                'prefix': self.prefix_check_box.isChecked(),
+            })
+        if not list_to_json:
+            std.std.message(self, "Award has no calls", "Add at least one callsign or prefix before saving.")
+            return
+
+        old_rules_moved = False
+        old_adi_moved = False
+        try:
+            if old_name and name_programm != old_name:
+                if old_rules is not None and old_rules.exists():
+                    old_rules.rename(new_rules)
+                    old_rules_moved = True
+                if old_adi is not None and old_adi.exists():
+                    old_adi.rename(new_adi)
+                    old_adi_moved = True
 
             self.write_rules_to_file(list_to_json, name_output_file=name_programm)
-            if self.settingsDict['diploms-json'] != "":
-                settings_list = json.loads(self.settingsDict['diploms-json'])
-            else:
-                self.settingsDict['diploms-json'] = json.dumps([{'name_programm': name_programm}])
-                main.Settings_file.update_file_to_disk(self)
-            if len(settings_list) > 0:
-                for i in range(len(settings_list)):
-                    if name_programm == str(settings_list[i]['name_programm']) and self.diplomname == '':
-                        std.std.message(self, "Programm with that name already exists", "Repeats")
-                        repeat_flag = 1
-                        break
-                    else:
-                        repeat_flag = 0
-            else:
-                repeat_flag = 0
-            if repeat_flag == 0:
-                if self.diplomname == '':
-                    settings_list.append({'name_programm': name_programm})
-                    self.settingsDict['diploms-json'] = json.dumps(settings_list)
-                    main.Settings_file.update_file_to_disk(self)
+            if is_new_award:
+                self.adi.create_adi(name_programm + ".adi")
+        except OSError as error:
+            if is_new_award:
+                if new_adi.exists():
+                    new_adi.unlink()
+                if new_rules.exists():
+                    new_rules.unlink()
+            if old_adi_moved and new_adi.exists():
+                new_adi.rename(old_adi)
+            if old_rules_moved and new_rules.exists():
+                new_rules.rename(old_rules)
+            std.std.message(self, "Unable to save award", str(error))
+            return
 
-                    self.logForm.menu_add(name_menu=self.name_input.text())
-                    self.adi.create_adi(name_programm + ".adi")
-                    self.close()
-                else:
-                    programs = len(settings_list)
-                    for i in range(programs):
-                        if settings_list[i]['name_programm'] == self.diplomname:
-                            self.adi.rename_adi(settings_list[i]['name_programm'] + ".adi",
-                                                self.name_input.text() + ".adi")
-                            settings_list[i]['name_programm'] = self.name_input.text()
+        if is_new_award:
+            settings_list.append({'name_programm': name_programm})
+        else:
+            for item in settings_list:
+                if item.get('name_programm') == old_name:
+                    item['name_programm'] = name_programm
+                    break
 
-                    self.settingsDict['diploms-json'] = json.dumps(settings_list)
-                    main.Settings_file.update_file_to_disk(self)
-                    self.logForm.menu_rename_diplom()
-                    self.logForm.diploms_init()
-                    self.logForm.menu()
-                    self.close()
-            self.logForm.diploms_init()
-        elif flag == 0:
-            pass
+        self.settingsDict['diploms-json'] = json.dumps(settings_list)
+        main.Settings_file.update_file_to_disk(self)
+        if is_new_award:
+            self.logForm.menu_add(name_menu=name_programm)
+        else:
+            self.logForm.menu_rename_diplom()
+            self.logForm.menu()
+        self.logForm.diploms_init()
+        self.close()
 
     def write_rules_to_file(self, data_to_json, name_output_file):
-        filename = str(name_output_file).strip() + '.rules'
-        with open(Path(__file__).parent/filename, 'w') as f:
-            f.write(json.dumps(data_to_json))
+        rules_path = _award_path(f"{str(name_output_file).strip()}.rules")
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', dir=rules_path.parent,
+                prefix=f".{rules_path.name}.", suffix='.tmp', delete=False,
+            ) as rules_file:
+                temporary_path = Path(rules_file.name)
+                json.dump(data_to_json, rules_file, ensure_ascii=False)
+                rules_file.flush()
+                os.fsync(rules_file.fileno())
+            os.replace(temporary_path, rules_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
 
 class Diplom(QObject):
@@ -343,7 +424,8 @@ class Diplom(QObject):
 
     def __init__(self, name, settingsDict, parent=''):
         super().__init__()
-        self.name = name
+        self.name = str(name).strip()
+        self.rules_path = _award_path(f"{self.name}.rules")
         self.settingsDict = settingsDict
         if parent != '':
             self.parentWindow = parent
@@ -366,7 +448,8 @@ class Diplom(QObject):
         # 1
         self.diplomDataList = self.getRules()
         # 2
-        self.adiFile = main.Adi_file("in", self.settingsDict, self.diplomDataList[0]['name'] + ".adi")
+        self.adi_path = _award_path(f"{self.diplomDataList[0]['name']}.adi")
+        self.adiFile = main.Adi_file("in", self.settingsDict, self.adi_path.name)
         # 3
         self.qsoData = self.getQsoData()
 
@@ -375,17 +458,15 @@ class Diplom(QObject):
         Parse .adi file and generated the dictionary object for QSOs
         :return: qsoDataList - object [{... QSO 1 info...},{...QSO 2 info...}]
         '''
-        qsoDataList = parse.getAllRecord(self.allCollumn, self.diplomDataList[0]['name'] + ".adi", key="import")
-        print("->-" * 10)
-        print(qsoDataList)
-        print("==" * 10)
-        return qsoDataList
+        return parse.getAllRecord(self.allCollumn, self.adi_path.name, key="import")
 
     def getRules(self):
-        with open(Path(__file__).parent/self.name + ".rules", 'r') as rules:
-            s = rules.readline()
-            # print("s", s)
-            rulesObject = json.loads(s)
+        with self.rules_path.open('r', encoding='utf-8') as rules:
+            rulesObject = json.load(rules)
+        if not isinstance(rulesObject, list) or not rulesObject:
+            raise ValueError("Award rules must be a non-empty list")
+        if any(not isinstance(rule, dict) for rule in rulesObject):
+            raise ValueError("Each award rule must be an object")
         return rulesObject
 
     def complete(self):
@@ -395,14 +476,34 @@ class Diplom(QObject):
             return True
         return False
 
-    def getScore(self):
-        totalScore = 0
-        for callFromRules in self.diplomDataList:
-            for qso in self.qsoData:
-                if qso['CALL'] == callFromRules['call']:
-                    totalScore = totalScore + int(callFromRules['score'])
+    @staticmethod
+    def _rule_matches_call(call, rule):
+        call = str(call or "").strip().upper()
+        rule_call = str(rule.get('call', '')).strip().upper()
+        if not call or not rule_call:
+            return False
+        if rule.get('prefix'):
+            return any(component.startswith(rule_call) for component in call.split('/'))
+        return call == rule_call
 
-        return totalScore
+    def getScore(self):
+        call_counts = Counter(
+            str(qso.get('CALL') or '').strip().upper()
+            for qso in self.qsoData
+            if qso.get('CALL')
+        )
+        total_score = 0
+        for rule in self.diplomDataList:
+            if rule.get('prefix'):
+                match_count = sum(
+                    count for call, count in call_counts.items()
+                    if self._rule_matches_call(call, rule)
+                )
+            else:
+                rule_call = str(rule.get('call', '')).strip().upper()
+                match_count = call_counts.get(rule_call, 0)
+            total_score += int(rule['score']) * match_count
+        return total_score
 
     def filter(self, callDict):
         if self.checkQso(callDict):
@@ -418,8 +519,8 @@ class diplom:
     '''
 
     def __init__(self, file, file_rules, settingsDict=''):
-        self.file = file
-        self.file_rules = file_rules.strip()
+        self.file = _award_path(file).name
+        self.file_rules = _award_path(file_rules).name
         self.allCollumn = ['records_number', 'QSO_DATE', 'TIME_ON', 'BAND', 'CALL', 'MODE', 'RST_RCVD', 'RST_SENT',
                            'NAME', 'QTH', 'COMMENTS', 'TIME_OFF', 'eQSL_QSL_RCVD']
         self.allRecord = parse.getAllRecord(self.allCollumn, self.file)
@@ -428,21 +529,20 @@ class diplom:
         if settingsDict != '':
             self.settingsDict = settingsDict
 
-    def get_rules(self, name):
-        with open(Path(__file__).parent/name, "r") as f:
-            return json.load(f)
+    @staticmethod
+    def get_rules(name):
+        with _award_path(name).open("r", encoding="utf-8") as f:
+            rules = json.load(f)
+        if not isinstance(rules, list) or not rules or any(not isinstance(rule, dict) for rule in rules):
+            raise ValueError("Award rules must be a list of objects")
+        return rules
 
     def search_call_in_base(self, call):
-        search_calls = []
-
-        # records = parse.getAllRecord(self.allCollumn, self.file)
-        record_count = len(self.allRecord)
-        for record in range(record_count):
-            if self.allRecord[record]['CALL'] == call:
-                search_calls.append(self.allRecord[record])
-                # print("AllRecords:_>", self.allRecord[record])
-                # print("Search_call_in_base:_>", records[record])
-        return search_calls
+        call = str(call or "").strip().upper()
+        return [
+            record for record in self.allRecord
+            if str(record.get('CALL', '')).strip().upper() == call
+        ]
 
     def get_color_bg(self):
         color = QColor(int(self.decode_data[0]['colorR']),
@@ -451,143 +551,87 @@ class diplom:
 
         return color
 
+    @staticmethod
+    def _mode_family(mode):
+        mode = str(mode or "").strip().upper()
+        if mode in {"SSB", "USB", "LSB", "DSB", "AM", "SAM", "FM", "NFM", "WFM"}:
+            return "SSB"
+        if mode in {"CW", "CWR"}:
+            return "CW"
+        if mode in {"DIGI", "DIGU", "DIGL", "FT8", "FT4", "RTTY", "PSK", "PSK31", "JT65", "JT9",
+                    "WSPR", "PKTUSB", "PKTLSB", "DATA", "MFSK"}:
+            return "DIGI"
+        return mode
+
+    @staticmethod
+    def _band_number(band):
+        digits = "".join(character for character in str(band or "") if character.isdigit())
+        return digits.lstrip("0") or "0"
+
+    @staticmethod
+    def _matches_rule_call(call, rule):
+        call = str(call or "").strip().upper()
+        rule_call = str(rule.get("call", "")).strip().upper()
+        if not call or not rule_call:
+            return False
+        if rule.get("prefix"):
+            return any(component.startswith(rule_call) for component in call.split("/"))
+        return call == rule_call
+
     def filter(self, call_dict):
-        '''
+        """Return whether a QSO or cluster spot still satisfies this award."""
+        rules = self.decode_data
+        if not rules:
+            return False
 
-        This function chek rules for qso.
-        The function get on input dictionary with data qso (call, mode,
-        band) and check it on rules for currently awards object
-            :param call_dict: dictionary with keys: call, mode, band
-            :return: boolean
-        '''
-        print("HEllo I am filter")
-        count_sps_call = len(self.decode_data)
-        call_found_status = 0
-        for i in range(count_sps_call):
-            if self.decode_data[i]['prefix']:
-                if call_dict['call'].find(self.decode_data[i]['call']) != -1:
-                    call_found_status = 1
-            else:
-                if self.decode_data[i]['call'] == call_dict['call']:
-                    call_found_status = 1
+        matching_rules = [rule for rule in rules if self._matches_rule_call(call_dict.get("call"), rule)]
+        if not matching_rules:
+            return False
 
-        # if filter using for cluster
-        if call_dict['mode'] == 'cluster' and call_found_status == 1:
+        # Cluster rows are highlighted for any configured callsign, regardless
+        # of current QSO mode or whether the award has already been completed.
+        if str(call_dict.get("mode", "")).lower() == "cluster":
             return True
-        else:
-            # print("repeats:_>", self.decode_data[0]['repeats'])
-            found_records_in_base_list = self.search_call_in_base(call_dict['call'])
-            # repeat 0 - resolved other bands
 
-            if str(self.decode_data[0]['repeats']) == '0' and call_found_status == 1:
+        target_mode = self._mode_family(call_dict.get("mode"))
+        matching_rules = [
+            rule for rule in matching_rules
+            if str(rule.get("mode", "")).strip().lower() in {"all", "prefix"}
+            or self._mode_family(rule.get("mode")) == target_mode
+        ]
+        if not matching_rules:
+            return False
 
-                # print("Found QSO(s) in base", len(found_records_in_base_list))
-
-                if len(found_records_in_base_list) == 0:
-
-                    return True
-                else:
-                    count_records_in_base_list = len(found_records_in_base_list)
-                    flag = True
-                    for i in range(count_records_in_base_list):
-                        if found_records_in_base_list[i]['BAND'] == call_dict['band']:
-                            flag = False
-                    if flag:
-                        return True
-                    else:
-                        return False
-
-            # repeat 1 - resolved other mods
-            if str(self.decode_data[0]['repeats']) == '1' and call_found_status == 1:
-                # print("Found QSO(s) in base", found_records_in_base_list)
-                if len(found_records_in_base_list) == 0:
-                    for i in range(count_sps_call):
-                        if (self.decode_data[i]['mode'] == 'all'):
-                            if call_dict['mode'] == self.decode_data[i]['mode'] \
-                                    and call_dict['call'] == self.decode_data[i]['call']:
-                                return True
-                            else:
-                                return False
-                        if (self.decode_data[i]['mode'] == 'prefix'):
-                            if call_dict['mode'] == self.decode_data[i]['mode'] \
-                                    and call_dict['call'].find(self.decode_data[i]['call']) != -1:
-                                return True
-                            else:
-                                return False
-
-                else:
-                    count_records_in_base_list = len(found_records_in_base_list)
-                    flag = True
-
-                    for i in range(count_sps_call):
-                        if call_dict['mode'] == self.decode_data[i]['mode'] \
-                                and call_dict['call'] == self.decode_data[i]['call']:
-
-                            for j in range(count_records_in_base_list):
-                                if call_dict['mode'] == found_records_in_base_list[j]['MODE']:
-                                    flag = False
-                        else:
-                            flag = False
-                    if flag:
-                        return True
-                    else:
-                        return False
-
-            # repeat 2 - resolved other mods and bands
-            if str(self.decode_data[0]['repeats']) == '2' and call_found_status == 1:
-                # print("Found QSO(s) in base", len(found_records_in_base_list),
-                #     found_records_in_base_list)
-                mode_status = 0
-                for i in range(count_sps_call):
-                    # print("call_dict['mode']", call_dict['mode'], "self.decode_data[i]['mode']",
-                    #  self.decode_data[i]['mode'])
-                    if (self.decode_data[i]['mode'] == 'all'):
-                        if call_dict['mode'] == self.decode_data[i]['mode'] \
-                                and call_dict['call'] == self.decode_data[i]['call']:
-                            mode_status = 1
-                    if (self.decode_data[i]['mode'] == 'prefix'):
-                        if call_dict['mode'] == self.decode_data[i]['mode'] \
-                                and call_dict['call'].find(self.decode_data[i]['call']) != -1:
-                            mode_status = 1
-
-                count_records_in_base_list = len(found_records_in_base_list)
-                # print ("mode status:_>", mode_status)
-                # print("Found in Base", len(found_records_in_base_list), found_records_in_base_list)
-                if count_records_in_base_list == 0 and mode_status == 1:
-                    # print("mode ok")
-                    return True
-                if count_records_in_base_list > 0 and mode_status == 1:
-                    flag = True
-                    for j in range(count_records_in_base_list):
-                        if call_dict['mode'] == found_records_in_base_list[j]['MODE'] \
-                                or call_dict['band'] == found_records_in_base_list[j]['BAND']:
-                            # print("QSO on this Band and this Mode found", found_records_in_base_list[j])
-                            flag = False
-
-                    if flag:
-                        # print("Filter out True")
-                        return True
-                    else:
-                        # print("Filter out False")
-                        return False
-
-            # repeat 3 - resolved other mods and bands
-            if str(self.decode_data[0]['repeats']) == '3' \
-                    and call_found_status == 1 \
-                    and len(found_records_in_base_list) == 0:
-                flag = False
-                for i in range(count_sps_call):
-
-                    if call_dict['mode'] == self.decode_data[i]['mode'] \
-                            and call_dict['call'] == self.decode_data[i]['call']:
-                        mode_status = 1
-                        flag = True
-            else:
-                flag = False
-            if flag:
-                return True
-            else:
+        first_rule = rules[0]
+        band_restricted = first_rule.get("only_bands_enable")
+        band_restricted = band_restricted is True or str(band_restricted).lower() == "true"
+        if band_restricted:
+            required_band = self._band_number(first_rule.get("only_bands"))
+            if required_band in {"", "0"} or self._band_number(call_dict.get("band")) != required_band:
                 return False
+
+        call = str(call_dict.get("call", "")).strip().upper()
+        call_records = [record for record in self.search_call_in_base(call)]
+        try:
+            repeats = int(first_rule.get("repeats", 0))
+        except (TypeError, ValueError):
+            return False
+        band = self._band_number(call_dict.get("band"))
+        mode = target_mode
+
+        if repeats == 0:
+            return not any(self._band_number(record.get("BAND")) == band for record in call_records)
+        if repeats == 1:
+            return not any(self._mode_family(record.get("MODE")) == mode for record in call_records)
+        if repeats == 2:
+            return not any(
+                self._mode_family(record.get("MODE")) == mode
+                and self._band_number(record.get("BAND")) == band
+                for record in call_records
+            )
+        if repeats == 3:
+            return not call_records
+        return False
 
     def add_qso(self, list_data):
         '''
@@ -604,34 +648,29 @@ class diplom:
                 :param list_data: List with Dictionary with QSO-data
                 :return:
                 '''
-        # print("List_data", list_data)
-        index = len(list_data)
-        with open(Path(__file__).parent/self.file, 'a') as file:
-            stringToAdiFile = "<BAND:" + str(len(list_data['BAND'])) + ">" + list_data['BAND'] + "<CALL:" + \
-                              str(len(list_data['CALL'])) + ">"
-
-            stringToAdiFile = stringToAdiFile + list_data['CALL'] + "<FREQ:" + str(
-                len(list_data['FREQ'])) + ">" + \
-                              list_data['FREQ']
-            stringToAdiFile = stringToAdiFile + "<MODE:" + str(len(list_data['MODE'])) + ">" + list_data[
-                'MODE'] + "<OPERATOR:" + str(len(list_data['OPERATOR']))
-            stringToAdiFile = stringToAdiFile + ">" + list_data['OPERATOR'] + "<QSO_DATE:" + str(
-                len(list_data['QSO_DATE'])) + ">"
-            stringToAdiFile = stringToAdiFile + list_data['QSO_DATE'] + "<TIME_ON:" + str(
-                len(list_data['TIME_ON'])) + ">"
-            stringToAdiFile = stringToAdiFile + list_data['TIME_ON'] + "<RST_RCVD:" + \
-                              str(len(list_data['RST_RCVD'])) + ">" + list_data['RST_RCVD']
-            stringToAdiFile = stringToAdiFile + "<RST_SENT:" + str(len(list_data['RST_SENT'])) + ">" + \
-                              list_data['RST_SENT'] + "<NAME:" + str(len(list_data['NAME'])) + ">" + \
-                              list_data['NAME'] + \
-                              "<QTH:" + str(len(list_data['QTH'])) + ">" + list_data['QTH'] + "<COMMENTS:" + \
-                              str(len(list_data['COMMENTS'])) + ">" + list_data['COMMENTS'] + "<TIME_OFF:" + \
-                              str(len(list_data['TIME_OFF'])) + ">" + list_data[
-                                  'TIME_OFF'] + "<eQSL_QSL_RCVD:1>Y<EOR>\n"
-            # print("string to ADI:", stringToAdiFile)
-            file.write(stringToAdiFile)
-            # print ("list_data:_>", list_data)
-            self.allRecord.append(list_data)
+        qso = dict(list_data)
+        comment = qso.get('COMMENT', qso.get('COMMENTS', ''))
+        fields = (
+            ('BAND', qso.get('BAND', '')),
+            ('CALL', qso.get('CALL', '')),
+            ('FREQ', main.Adi_file._format_adif_frequency(qso.get('FREQ'))),
+            ('MODE', qso.get('MODE', '')),
+            ('OPERATOR', qso.get('OPERATOR', '')),
+            ('QSO_DATE', qso.get('QSO_DATE', '')),
+            ('TIME_ON', qso.get('TIME_ON', '')),
+            ('RST_RCVD', qso.get('RST_RCVD', '')),
+            ('RST_SENT', qso.get('RST_SENT', '')),
+            ('NAME', qso.get('NAME', '')),
+            ('QTH', qso.get('QTH', '')),
+            ('COMMENTS', comment),
+            ('TIME_OFF', qso.get('TIME_OFF', '')),
+            ('eQSL_QSL_RCVD', 'Y'),
+        )
+        record = ''.join(main._format_adi_field(name, value) for name, value in fields) + '<EOR>\n'
+        path = _award_path(self.file)
+        with path.open('a', encoding='utf-8') as file:
+            file.write(record)
+        self.allRecord.append(qso)
 
     def get_count_qso(self):
         return len(self.allRecord)
@@ -644,22 +683,48 @@ class diplom:
 
     def del_dilpom(self, name_diplom, settingsDict, logForm):
         self.settingsDict = settingsDict
-        if self.settingsDict['diploms-json'] != '':
-            list_string = json.loads(self.settingsDict['diploms-json'])
-            # print(type(list_string))
-            count_diploms = len(list_string)
-            for i in range(count_diploms):
-                if list_string[i]['name_programm'] == name_diplom:
-                    del list_string[i]
-            self.settingsDict['diploms-json'] = json.dumps(list_string)
-            main.Settings_file.update_file_to_disk(self)
+        try:
+            rules_path = _award_path(f"{name_diplom}.rules")
+            adi_path = _award_path(f"{name_diplom}.adi")
+            saved_awards = json.loads(self.settingsDict.get('diploms-json') or '[]')
+            if not isinstance(saved_awards, list):
+                raise ValueError("The saved award list is invalid")
+            remaining_awards = [
+                award for award in saved_awards
+                if not isinstance(award, dict) or award.get('name_programm') != name_diplom
+            ]
+            if len(remaining_awards) == len(saved_awards):
+                raise ValueError("The award was not found in the saved list")
 
-        # print("del_dilpom", list_string)
-        os.remove(name_diplom + '.rules')
-        os.remove(name_diplom + '.adi')
+            previous_value = self.settingsDict.get('diploms-json', '')
+            paths_to_remove = [path for path in (rules_path, adi_path) if path.is_file()]
+            with tempfile.TemporaryDirectory(
+                prefix='.award-delete-', dir=Path(__file__).parent
+            ) as backup_directory:
+                backup_directory = Path(backup_directory)
+                moved_files = []
+                try:
+                    for source in paths_to_remove:
+                        backup = backup_directory / source.name
+                        source.rename(backup)
+                        moved_files.append((backup, source))
+
+                    self.settingsDict['diploms-json'] = json.dumps(remaining_awards)
+                    main.Settings_file.update_file_to_disk(self)
+                except Exception:
+                    self.settingsDict['diploms-json'] = previous_value
+                    for backup, source in reversed(moved_files):
+                        if backup.exists():
+                            backup.rename(source)
+                    raise
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            std.std.message(logForm, "Unable to delete award", str(error))
+            return False
+
         logForm.menu_rename_diplom()
         logForm.diploms_init()
         logForm.menu()
+        return True
 
     def checkQso(self, callDict):
         self.diplomsObject = self.get_data()
@@ -726,9 +791,11 @@ class static_diplom(QWidget):
     def update(self):
         self.all_column = ['records_number', 'QSO_DATE', 'TIME_ON', 'BAND', 'CALL', 'MODE', 'RST_RCVD', 'RST_SENT',
                            'NAME', 'QTH', 'COMMENTS', 'TIME_OFF', 'eQSL_QSL_RCVD']
-        self.rules = diplom.get_rules(diplom, self.diplom_name + '.rules')
+        self.rules = diplom.get_rules(_award_path(f"{self.diplom_name}.rules").name)
         self.score_final_label.setText("Total score need: " + str(self.rules[0]['score_complite']))
-        self.all_records = parse.getAllRecord(self.all_column, self.diplom_name + '.adi')
+        self.all_records = parse.getAllRecord(
+            self.all_column, _award_path(f"{self.diplom_name}.adi").name
+        )
         records_count = len(self.all_records)
         column_count = len(self.all_column)
         self.table_widget.move(0, 0)

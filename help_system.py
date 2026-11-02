@@ -1,7 +1,10 @@
 import sys
 import pymysql
+import config_store
 import time
 import subprocess
+import re
+from pathlib import Path
 from PyQt6.QtWidgets import QVBoxLayout, QPushButton, QHBoxLayout, QLabel, QLineEdit, QWidget, QApplication, \
     QMainWindow, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap
@@ -131,56 +134,49 @@ class Help(QMainWindow):
         self.show()
 
     def check_base(self):
+        database_name = self.base_db.text().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]+", database_name):
+            self.message("Invalid database name", "Use only letters, digits, and underscores.")
+            return
 
-        # try:
-        connection = pymysql.connect(
-            host=self.host_db.text().strip(),
-            user=self.login_db.text().strip(),
-            password=self.pass_db.text().strip(),
-            # db=self.globad_db_name,
-            charset=settingsDict['db-charset'],
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        cursor = connection.cursor()
-        cursor.execute("show databases like '" + self.base_db.text().strip() + "'")
-        answer = cursor.fetchall()
-        print("Show DATABASE LIKE'linuxlog'", type(answer), answer)
-        if not answer:
-            cursor.execute('CREATE DATABASE ' + self.base_db.text().strip())
-
-        connection.close()
-        self.update_file_to_disk()
-        # time.sleep(1)
-        self.close()
-        subprocess.call(["python3", "main.py"])
-        #
-        # exit(0)
-
-    # except Exception:
-    #    self.message("<p style='color: red;'>Not Working</p>", "Can't connect to MySQL server \nPlease check data in fileds ")
+        connection = None
+        try:
+            connection = pymysql.connect(
+                host=self.host_db.text().strip(),
+                user=self.login_db.text().strip(),
+                password=self.pass_db.text().strip(),
+                charset=settingsDict['db-charset'],
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=5,
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+                    (database_name,),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(f"CREATE DATABASE `{database_name}`")
+            connection.close()
+            connection = None
+            self.update_file_to_disk()
+            self.close()
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).parent / "main.py")],
+                cwd=str(Path(__file__).parent),
+            )
+        except (pymysql.MySQLError, OSError) as error:
+            self.message("Database setup failed", str(error))
+        finally:
+            if connection is not None:
+                connection.close()
 
     def update_file_to_disk(self):
-        # self.settingsDict = self
-        filename = 'settings.cfg'
-        with open(Path(__file__).parent/filename, 'r') as f:
-            old_data = f.readlines()
-        for index, line in enumerate(old_data):
-            key_from_line = line.split('=')[0]
-
-            if key_from_line == "db-host":
-                print("key_from_line:", key_from_line)
-                old_data[index] = "db-host=" + self.host_db.text().strip() + "\n"
-            if key_from_line == "db-user":
-                old_data[index] = "db-user=" + self.login_db.text().strip() + "\n"
-            if key_from_line == "db-pass":
-                old_data[index] = "db-pass=" + self.pass_db.text().strip() + "\n"
-            if key_from_line == "db-name":
-                old_data[index] = "db-name=" + self.base_db.text().strip() + "\n"
-
-        with open(Path(__file__).parent/filename, 'w') as f:
-            f.writelines(old_data)
-        # print("Update_to_disk: ", old_data)
-        return True
+        return config_store.update_settings({
+            "db-host": self.host_db.text().strip(),
+            "db-user": self.login_db.text().strip(),
+            "db-pass": self.pass_db.text().strip(),
+            "db-name": self.base_db.text().strip(),
+        })
 
     def fill_help_text(self, lang='eng'):
 
@@ -201,22 +197,12 @@ class Help(QMainWindow):
         message.setText(caption)
         message.setInformativeText(text_message)
         message.setStandardButtons(QMessageBox.Ok)
-        message.exec_()
+        message.exec()
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    settingsDict = {}
-    file = open(Path(__file__).parent/'settings.cfg', "r")
-    for configstring in file:
-        if configstring != '' and configstring != ' ' and configstring[0] != '#':
-            configstring = configstring.strip()
-            configstring = configstring.replace("\r", "")
-            configstring = configstring.replace("\n", "")
-            splitString = configstring.split('=')
-            settingsDict.update({splitString[0]: splitString[1]})
-
-    file.close()
+    settingsDict = config_store.load_settings()
 
     if len(sys.argv) > 1:
         help_w = Help()

@@ -106,9 +106,30 @@ echo -e "${BLUE}[2/6] Активация и запуск службы MariaDB...
 sudo systemctl enable --now mariadb
 
 # Создание базы данных и пользователя
-DB_NAME="linuxlog"
-DB_USER="linuxlog"
-DB_PASS="Linuxlog12#"
+DB_CONFIG_PATH="$INSTALL_DIR/settings.cfg"
+if [ ! -f "$DB_CONFIG_PATH" ]; then
+    DB_CONFIG_PATH="./settings.cfg"
+fi
+mapfile -t DB_CONFIG < <(python3 - "$DB_CONFIG_PATH" <<'PY'
+from pathlib import Path
+import sys
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if "=" in line and not line.lstrip().startswith("#"):
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+print(values.get("db-name") or "linuxlog")
+print(values.get("db-user") or "linuxlog")
+PY
+)
+DB_NAME="${DB_CONFIG[0]}"
+DB_USER="${DB_CONFIG[1]}"
+if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_]+$ || ! "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo -e "${RED}Ошибка: имя базы и пользователя могут содержать только латинские буквы, цифры и _.${NC}"
+    exit 1
+fi
+DB_PASS="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
 
 echo -e "${BLUE}Настройка базы данных проекта в MariaDB...${NC}"
 
@@ -139,7 +160,35 @@ rsync -av \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='.idea' \
+    --exclude='settings.cfg' \
+    --exclude='country' \
+    --exclude='*.adi' \
+    --exclude='*.rules' \
+    --exclude='image/***' \
+    --exclude='eqsl/***' \
     ./ "$INSTALL_DIR/"
+
+# Seed user data on a new install, but keep existing files on upgrades.
+rsync -av --ignore-existing settings.cfg country "$INSTALL_DIR/"
+find . -maxdepth 1 -type f \( -name '*.adi' -o -name '*.rules' \) \
+    -exec rsync -av --ignore-existing {} "$INSTALL_DIR/" \;
+for user_data_dir in image eqsl; do
+    mkdir -p "$INSTALL_DIR/$user_data_dir"
+    rsync -av --ignore-existing "$user_data_dir/" "$INSTALL_DIR/$user_data_dir/"
+done
+
+# Keep the application's database credentials in sync with the generated DB user.
+python3 - "$INSTALL_DIR/settings.cfg" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
+import sys
+from pathlib import Path
+
+install_dir = Path(sys.argv[1]).parent
+sys.path.insert(0, str(install_dir))
+from config_store import update_settings
+
+update_settings({"db-name": sys.argv[2], "db-user": sys.argv[3], "db-pass": sys.argv[4]}, path=sys.argv[1])
+PY
+chmod 600 "$INSTALL_DIR/settings.cfg"
 
 # 6. Создание виртуального окружения Python
 echo -e "${BLUE}[4/6] Настройка виртуального окружения (venv)...${NC}"
@@ -157,7 +206,7 @@ if [ -f "requirements.txt" ]; then
     python -m pip install -r requirements.txt
 else
     # Запасной вариант, если файла зависимостей нет
-    python -m pip install PyQt6 pyserial requests
+    python -m pip install PyQt6 pyserial requests beautifulsoup4 PyMySQL websocket-client websockets
 fi
 
 deactivate
@@ -211,4 +260,4 @@ echo -e "${GREEN}=== Установка успешно завершена в с�
 echo "Данные для подключения Python-приложения к MariaDB:"
 echo -e "База данных: ${BLUE}${DB_NAME}${NC}"
 echo -e "Пользователь: ${BLUE}${DB_USER}${NC}"
-echo -e "Пароль: ${BLUE}${DB_PASS}${NC}"
+echo "Пароль MariaDB создан случайным образом и сохранён в settings.cfg."

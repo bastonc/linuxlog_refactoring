@@ -1,9 +1,10 @@
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 from time import sleep
+from urllib.parse import urlencode, urljoin, urlsplit
+import re
 
 import requests
 from PyQt6 import uic
@@ -37,8 +38,12 @@ class ConnectionToEqsl(QThread):
         self.signal = signal
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         try:
-            response_from_server = requests.get(self.url)
+            response_from_server = requests.get(self.url, timeout=30)
+            if self.isInterruptionRequested():
+                return
             if self.signal == "base_html":
                 self.get_base_html.emit(response_from_server)
             elif self.signal == "adi_file":
@@ -50,8 +55,9 @@ class ConnectionToEqsl(QThread):
             elif self.signal == "outbox_link":
                 self.outbox_adi.emit(response_from_server)
 
-        except BaseException:
-            self.error_connection.emit()
+        except requests.RequestException:
+            if not self.isInterruptionRequested():
+                self.error_connection.emit()
 
 
 class EqslWindow(QWidget):
@@ -65,7 +71,10 @@ class EqslWindow(QWidget):
         self.ADDED = "In log"
         self.SEND = "Sent"
         self.base_url_eqsl = "https://www.eQSL.cc"
-        self.auth_parameter = f"?UserName={self.settings_dict['eqsl_user']}&Password={self.settings_dict['eqsl_password']}"
+        self.auth_parameters = {
+            "UserName": self.settings_dict['eqsl_user'],
+            "Password": self.settings_dict['eqsl_password'],
+        }
         self.url_get_link_to_adi = f"/qslcard/DownloadInBox.cfm"
         self.upload_qsl_url = "/qslcard/DownloadADIF.cfm"
         uic.loadUi(Path(__file__).parent/"eqsl_inbox.ui", self)
@@ -100,6 +109,8 @@ class EqslWindow(QWidget):
         self.all_confirm = True
         self.all_add = True
         self.all_qso_list = []
+        self._connection_threads = []
+        self._closing = False
         self.close_btn.clicked.connect(self.close)
         self.show()
 
@@ -110,22 +121,51 @@ class EqslWindow(QWidget):
         :param signal:
         :return:
         """
-        print("URL:", url, signal)
-        self.thread_connection = ConnectionToEqsl(self)
-        self.thread_connection.set_attribute(url=url, signal=signal)
-        #self.check_run_thread()
-        self.thread_connection.get_base_html.connect(self.processing_answer_eqsl)
-        self.thread_connection.get_adi_file.connect(self.processing_adi_file)
-        self.thread_connection.get_html_img_eqsl.connect(self.processing_html_img_eqsl)
-        self.thread_connection.get_img_eqsl.connect(self.processing_img_eqsl)
-        self.thread_connection.outbox_adi.connect(self.processing_link_outbox_adi)
-        self.thread_connection.error_connection.connect(self.error_connection_processing)
-        self.thread_connection.start()
+        if self._closing:
+            return
+        worker = ConnectionToEqsl(self)
+        worker.set_attribute(url=url, signal=signal)
+        worker.get_base_html.connect(self.processing_answer_eqsl)
+        worker.get_adi_file.connect(self.processing_adi_file)
+        worker.get_html_img_eqsl.connect(self.processing_html_img_eqsl)
+        worker.get_img_eqsl.connect(self.processing_img_eqsl)
+        worker.outbox_adi.connect(self.processing_link_outbox_adi)
+        worker.error_connection.connect(self.error_connection_processing)
+        worker.finished.connect(lambda worker=worker: self._connection_finished(worker))
+        worker.finished.connect(worker.deleteLater)
+        self._connection_threads.append(worker)
+        worker.start()
+
+    def _connection_finished(self, worker):
+        if worker in self._connection_threads:
+            self._connection_threads.remove(worker)
+        if self._closing and not any(thread.isRunning() for thread in self._connection_threads):
+            self.close()
+
+    def prepare_close(self):
+        self._closing = True
+        active_threads = [thread for thread in self._connection_threads if thread.isRunning()]
+        for thread in active_threads:
+            thread.requestInterruption()
+        return not active_threads
+
+    def closeEvent(self, event):
+        if not self.prepare_close():
+            event.ignore()
+            return
+        event.accept()
+
+    def eqsl_url(self, path, parameters=None):
+        query = dict(self.auth_parameters)
+        if parameters:
+            query.update(parameters)
+        return f"{self.base_url_eqsl}{path}?{urlencode(query)}"
 
     # Slot for processing html with links to ADI file
     @pyqtSlot(object)
     def processing_answer_eqsl(self, answer_from_eqsl):
-        self.thread_connection.destroyed
+        if self._closing:
+            return
         if answer_from_eqsl.status_code == 200:
             self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
             self.status_lbl.setText("Complete")
@@ -139,23 +179,26 @@ class EqslWindow(QWidget):
     # Slot for processing link to outbox ADI
     @pyqtSlot(object)
     def processing_link_outbox_adi(self, answer_from_eqsl):
-        if answer_from_eqsl.status_code == 200:
-            self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
-            self.status_lbl.setText("Complete")
-            link_adi_file = self.get_url_adi_file(answer_from_eqsl)
-
-        print(link_adi_file)
+        if self._closing:
+            return
+        if answer_from_eqsl.status_code != 200:
+            self.error_connection_processing()
+            return
+        self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
+        self.status_lbl.setText("Complete")
+        self.get_url_adi_file(answer_from_eqsl)
     # Slot for processing ADI file
     @pyqtSlot(object)
     def processing_adi_file(self, answer_from_eqsl):
-        self.thread_connection.destroyed
+        if self._closing:
+            return
         if answer_from_eqsl.status_code == 200:
             self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
             self.status_lbl.setText("Complete")
             # self.adi_normalizer(tags=answer_from_eqsl.text,
             #                     fields_adi_standart=self.settings_dict['adi_fields'],
             #                     settings_dict=self.settings_dict)
-            with open(Path(__file__).parent/"eqsl_import.adi", "w") as f:
+            with (Path(__file__).parent / "eqsl_import.adi").open("w", encoding="utf-8") as f:
                 f.write(answer_from_eqsl.text)
             self.output_adi_to_table(answer_from_eqsl.text)
         else:
@@ -165,28 +208,42 @@ class EqslWindow(QWidget):
     # Slot fo processing html with link to image of eQSL
     @pyqtSlot(object)
     def processing_html_img_eqsl(self, response):
-        self.thread_connection.destroyed
-        img_url = f"{self.base_url_eqsl}{self.get_url_img_eqsl(response)}"
+        if self._closing:
+            return
+        image_source = self.get_url_img_eqsl(response)
+        if not image_source:
+            self.error_connection_processing()
+            return
+        img_url = urljoin(self.base_url_eqsl + "/", image_source)
+        parsed_url = urlsplit(img_url)
+        if parsed_url.scheme != "https" or parsed_url.hostname not in {"eqsl.cc", "www.eqsl.cc"}:
+            self.error_connection_processing()
+            return
         self.connection_to_eqsl_thread(img_url, signal="get_img_eqsl")
 
     # Slot fo processing image of eQSL
     @pyqtSlot(object)
     def processing_img_eqsl(self, response):
-        self.thread_connection.exit(0)
+        if self._closing:
+            return
         try:
-            with open(Path(__file__).parent/f'{self.path}/{self.img_name}', 'wb') as f:
-                f.write(response.content)
+            if response.status_code != 200:
+                raise OSError("Image download failed")
+            image_path = (self.path / self.img_name).resolve()
+            if image_path.parent != self.path.resolve():
+                raise ValueError("Invalid eQSL image filename")
+            image_path.write_bytes(response.content)
             self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
             self.status_lbl.setText("Complete")
-        except FileNotFoundError:
+        except (OSError, ValueError):
             self.img_name = "default.png"
         self.show_image_eqsl(f'{self.path}/{self.img_name}')
 
     # slot for processing connection error
     @pyqtSlot()
     def error_connection_processing(self):
-        self.thread_connection.exit(0)
-        self.thread_connection.wait()
+        if self._closing:
+            return
         self.chek_btn.setEnabled(True)
         self.status_lbl.setStyleSheet("color: #BB4444;")
         self.status_lbl.setText("Connection error")
@@ -196,24 +253,23 @@ class EqslWindow(QWidget):
         self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
         self.status_lbl.setText("Connecting to eQSL.cc")
         if self.unconfirmed_chkbx.isChecked():
-            url_eqsl = f"{self.base_url_eqsl}{self.url_get_link_to_adi}{self.auth_parameter}&UnconfirmedOnly=1"
+            parameters = {"UnconfirmedOnly": "1"}
         elif self.confirmed_chkbx.isChecked():
-            url_eqsl = f"{self.base_url_eqsl}{self.url_get_link_to_adi}{self.auth_parameter}&ConfirmedOnly=1"
+            parameters = {"ConfirmedOnly": "1"}
         elif self.upload_chkbx.isChecked():
-            url_eqsl = f"{self.base_url_eqsl}{self.upload_qsl_url}{self.auth_parameter}"
+            parameters = {}
+            path = self.upload_qsl_url
         else:
-            url_eqsl = f"{self.base_url_eqsl}{self.url_get_link_to_adi}{self.auth_parameter}"
+            parameters = {}
+        if not self.upload_chkbx.isChecked():
+            path = self.url_get_link_to_adi
         if self.date_chkbx.isChecked():
             self.date_start = self.calendar_start.selectedDate()
             self.date_finish = self.calendar_finish.selectedDate()
             # ММ/ДД/ГГГГ
-            date_parameter = f"&LimitDateLo={str(self.date_start.month()) if int(self.date_start.month()) > 10 else '0' + str(self.date_start.month())}"
-            date_parameter += f"%2F{str(self.date_start.day()) if int(self.date_start.day()) > 10 else '0' + str(self.date_start.day())}"
-            date_parameter += f"%2F{str(self.date_start.year())}"
-            date_parameter += f"&LimitDateHi={str(self.date_finish.month()) if int(self.date_finish.month()) > 10 else '0' + str(self.date_finish.month())}"
-            date_parameter += f"%2F{str(self.date_finish.day()) if int(self.date_finish.day()) > 10 else '0' + str(self.date_finish.day())}"
-            date_parameter += f"%2F{str(self.date_finish.year())}"
-            url_eqsl += date_parameter
+            parameters["LimitDateLo"] = f"{self.date_start.month():02}/{self.date_start.day():02}/{self.date_start.year()}"
+            parameters["LimitDateHi"] = f"{self.date_finish.month():02}/{self.date_finish.day():02}/{self.date_finish.year()}"
+        url_eqsl = self.eqsl_url(path, parameters)
         self.connection_to_eqsl_thread(url_eqsl)
 
     def get_url_adi_file(self, answer_form_eqsl):
@@ -244,7 +300,6 @@ class EqslWindow(QWidget):
             self.all_qso_list.clear()
             for string in strings:
                 qso_dict = parse.parseStringAdi(string, self.settings_dict['adi_fields'], self.settings_dict)
-                print(f"qso_dict")
                 if qso_dict.get("CALL"):
                     self.all_qso_list.append(qso_dict) if qso_dict is not None else None
         for row, qso in enumerate(self.all_qso_list, start=1):
@@ -290,30 +345,38 @@ class EqslWindow(QWidget):
         self.chek_btn.setEnabled(True)
 
     def get_image_eqsl(self, qso: dict):
-        self.img_name = f"{str(qso['CALL']).replace('/', '_')}_{qso['MODE']}_{qso['BAND']}_{qso['QSO_DATE']}.jpg"
-        if os.path.exists(os.path.join(self.path, self.img_name)):
-            self.show_image_eqsl(os.path.join(self.path, self.img_name))
+        image_name = "_".join(str(qso.get(field, "")) for field in ("CALL", "MODE", "BAND", "QSO_DATE"))
+        image_name = re.sub(r"[^A-Za-z0-9_.-]", "_", image_name)[:180] + ".jpg"
+        self.img_name = image_name
+        image_path = self.path / image_name
+        if image_path.is_file():
+            self.show_image_eqsl(str(image_path))
         else:
             self.status_lbl.setStyleSheet(f"color: {self.settings_dict['color']}")
             self.status_lbl.setText("Getting eQSL from eQSL.cc")
-            get_img_url = f"{self.base_url_eqsl}/qslcard/GeteQSL.cfm?Username={self.settings_dict['eqsl_user']}"
-            get_img_url += f"&Password={self.settings_dict['eqsl_password']}&CallsignFrom={qso['CALL']}&QSOBand={qso['BAND']}"
-            get_img_url += f"&QSOMode={qso['MODE']}&QSOYear={qso['QSO_DATE'][:4]}&QSOMonth={qso['QSO_DATE'][4:6]}&QSODay={qso['QSO_DATE'][6:]}"
-            get_img_url += f"&QSOHour={qso['TIME_ON'][:2]}&QSOMinute={qso['TIME_ON'][2:]}"
+            get_img_url = self.eqsl_url("/qslcard/GeteQSL.cfm", {
+                "CallsignFrom": qso['CALL'],
+                "QSOBand": qso['BAND'],
+                "QSOMode": qso['MODE'],
+                "QSOYear": qso['QSO_DATE'][:4],
+                "QSOMonth": qso['QSO_DATE'][4:6],
+                "QSODay": qso['QSO_DATE'][6:],
+                "QSOHour": qso['TIME_ON'][:2],
+                "QSOMinute": qso['TIME_ON'][2:],
+            })
             self.connection_to_eqsl_thread(get_img_url, signal="get_eqsl_html_img")
 
     def get_url_img_eqsl(self, answer_form_eqsl):
         soup = BeautifulSoup(answer_form_eqsl.text, 'html.parser')
         img = soup.find("img")
-        return img["src"]
+        return img.get("src") if img else None
 
     def show_image_eqsl(self, path):
         opener = "open" if sys.platform == "darwin" else "xdg-open"
         subprocess.call([opener, path])
 
     def check_run_thread(self):
-        if self.thread_connection.isRunning():
-            self.thread_connection.exit(0)
+        self.prepare_close()
 
     def state_date(self):
         if self.date_chkbx.isChecked():
@@ -424,7 +487,6 @@ class EqslWindow(QWidget):
             add_ckbx = self.tableWidget.cellWidget(row, index_cell)
             if add_ckbx is not None and add_ckbx.isChecked():
                 for qso in self.all_qso_list:
-                    print(qso)
                     if qso["CALL"] == self.tableWidget.item(row, 2).text() and \
                         qso["QSO_DATE"] == self.tableWidget.item(row, 0).text() and \
                         qso["MODE"] == self.tableWidget.item(row, 4).text() and \

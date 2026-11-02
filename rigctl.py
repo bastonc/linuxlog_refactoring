@@ -14,8 +14,8 @@ class Rigctl_sender(QObject):
     def send_command(self, command):
         self.command = command
         try:
-            self.rigctl_socket.send(bytes(str(self.command+"\n").encode("ascii")))
+            self.rigctl_socket.sendall((str(self.command) + "\n").encode("ascii"))
             read_string = self.rigctl_socket.recv(1024)
             return bytes.decode(read_string, "utf-8").replace("\n", "")
-        except BaseException:
+        except (OSError, UnicodeError):
             self.error_send_signal.emit(self.command)

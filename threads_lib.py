@@ -23,7 +23,10 @@ class Set_connect_thread(QThread):
 
     def close_socket(self):
         if self.telnet_socket is not None:
-            self.telnet_socket.close()
+            try:
+                self.telnet_socket.close()
+            except OSError:
+                pass
             self.telnet_socket = None
 
     def stop_tying_connect(self):
@@ -31,17 +34,26 @@ class Set_connect_thread(QThread):
 
     def run(self):
         while self.try_connect:
+            connection = None
             try:
                 print(f"Try connected to {self.HOST}:{self.PORT} id thread: {id(self)}")
-                self.telnet_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.telnet_socket.connect((self.HOST, int(self.PORT)))
-                self.connect_socket_signal.emit(self.telnet_socket)
-                break
-            except:
+                connection = socket.create_connection((self.HOST, int(self.PORT)), timeout=10)
+                connection.settimeout(None)
+                if not self.try_connect:
+                    connection.close()
+                    return
+                self.telnet_socket = connection
+                self.connect_socket_signal.emit(connection)
+                return
+            except (OSError, ValueError, TypeError):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
                 self.error_connect_thread_signal.emit("Error")
                 print(f"Except connection to {self.HOST}:{self.PORT}")
-                QThread.sleep(2)
-                continue
+                self.msleep(2000)
 
 
 class RigctlMainLoop(QThread):
@@ -68,10 +80,10 @@ class RigctlMainLoop(QThread):
 
     def command_transaction(self, command):
         try:
-            self.socket.send(bytes(str(command + "\n").encode("ascii")))
+            self.socket.sendall(str(command + "\n").encode("ascii"))
             read_answer = self.socket.recv(1024)
             return bytes.decode(read_answer, self.encoding, errors="ignore").replace("\n", "")
-        except BaseException:
+        except (OSError, UnicodeError):
             return False
 
 
@@ -167,6 +179,7 @@ class Rigctl_thread(QThread):
         self.HOST = host
         self.PORT = port
         self.socket = None
+        self.socket_connect = None
         self.repeat_connection = 20
         self.counter_repeat_connection = 0
 
@@ -182,7 +195,7 @@ class Rigctl_thread(QThread):
     def connect_ok(self, socket_obj: socket.socket):
         self.socket = socket_obj
         self.socket.settimeout(5)
-        self.socket_connect.terminate()
+        self.socket_connect.stop_tying_connect()
         self.rigctl_ready_signal.emit(self.socket)
 
 
@@ -193,10 +206,11 @@ class Rigctl_thread(QThread):
         self.socket = None
 
     def socket_shutdown(self):
-        self.socket_connect.close_socket()
+        if self.socket_connect is not None:
+            self.socket_connect.stop_tying_connect()
+            self.socket_connect.close_socket()
         if self.socket is not None:
             self.socket.close()
-        self.socket_connect.stop_tying_connect()
 
 
     def run(self):

@@ -3,13 +3,24 @@ import json
 import pymysql
 import random
 import datetime
+import csv
+from pathlib import Path
 from pymysql.cursors import DictCursor
-from time import gmtime, strftime
+import config_store
 
 
+settingsDict = {}
 
-def reset_country_file(country_dict={}):
-    if country_dict == {}:
+
+def ensure_settings_loaded():
+    global settingsDict
+    if not settingsDict:
+        settingsDict = load_settings()
+    return settingsDict
+
+
+def reset_country_file(country_dict=None):
+    if country_dict is None:
         country_dict = {
             'Ukraine': {'prefix': ['UR', 'UT', 'UX', 'EM', 'EN'],
                         'itu': '29',
@@ -85,7 +96,9 @@ def reset_country_file(country_dict={}):
                         'cq-zone': '12'},
         }
 
-    with open(Path(__file__).parent/settingsDict['country-file'], 'w') as f:
+    settings = ensure_settings_loaded()
+    country_path = Path(__file__).parent / settings['country-file']
+    with country_path.open('w', encoding='utf-8') as f:
         json.dump(country_dict, f)
 
 def csv_to_json_country(csv_file):
@@ -94,175 +107,145 @@ def csv_to_json_country(csv_file):
                     "pfx,pfx;country;cq-zone;itu"
     :return: convert CSV to JSON and create file and settingsDict['country-file']
     """
-    with open(Path(__file__).parent/csv_file, 'r') as f:
-        lines = f.readlines()
-
     object_to_json = {}
-    for line in lines:
-        prefix_list_clean = []
-        data_list = line.split(';')
-        #print("Data_list", data_list)
-        prefix_list_dark = data_list[0].split(',')
-        for elem in prefix_list_dark:
-            elem_clean = elem.strip()
-            prefix_list_clean.append(elem_clean)
-        country = data_list[1]
-        cq_zone = data_list[2]
-        itu = data_list[3]
-        object_to_json.update({
-            country: {'prefix':prefix_list_clean,
-                      'itu': itu,
-                      'cq-zone': cq_zone
-                      }
-        })
+    csv_path = Path(__file__).parent / csv_file
+    with csv_path.open('r', encoding='utf-8', newline='') as country_file:
+        for row in csv.reader(country_file, delimiter=';'):
+            if len(row) < 4:
+                continue
+            prefixes, country, cq_zone, itu = (value.strip() for value in row[:4])
+            if not country:
+                continue
+            object_to_json[country] = {
+                'prefix': [prefix.strip() for prefix in prefixes.split(',') if prefix.strip()],
+                'itu': itu,
+                'cq-zone': cq_zone,
+            }
 
     reset_country_file(object_to_json)
     #print("Full Object", object_to_json)
 
 def delete_all_qso(table_name):
+    if isinstance(table_name, (list, tuple)):
+        table_name = table_name[0] if table_name else ''
+    table_name = str(table_name)
+    if not table_name or "\x00" in table_name:
+        raise ValueError("Invalid database table name")
+    quoted_table_name = "`" + table_name.replace("`", "``") + "`"
 
+    settings = ensure_settings_loaded()
     connection = pymysql.connect(
-        host=settingsDict['db-host'],
-        user=settingsDict['db-user'],
-        password=settingsDict['db-pass'],
-        db=settingsDict['db-name'],
-        charset=settingsDict['db-charset'],
+        host=settings['db-host'],
+        user=settings['db-user'],
+        password=settings['db-pass'],
+        db=settings['db-name'],
+        charset=settings['db-charset'],
         cursorclass=DictCursor
     )
-    query = "DELETE FROM "+str(table_name[0])
-    result = connection.cursor().execute(query)
-    connection.commit()
+    try:
+        with connection.cursor() as cursor:
+            result = cursor.execute(f"DELETE FROM {quoted_table_name}")
+        connection.commit()
+    finally:
+        connection.close()
     print("Result clear operation for", table_name, ":", result)
 
+def _adi_field(name, value):
+    value = str(value)
+    return f"<{name}:{len(value)}>{value}"
+
+
 def generate_adif(count, name_file):
-    if count.isdigit():
-        strings_list = []
-        for i in range(int(count)):
-            laters_list = ['A', 'B', 'C', 'D', 'E', 'F',
-                           'G', 'H', 'I', 'K', 'L', 'M',
-                           'N', 'O', 'P', 'Q', 'R', 'S',
-                           'T', 'V', 'X', 'Y', 'Z']
-            digit_list =['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
-            char_1 = random.choice(laters_list)
-            char_2 = random.choice(laters_list)
-            random_digit = random.choice(digit_list)
-            char_3 = random.choice(laters_list)
-            char_4 = random.choice(laters_list)
-            char_5 = random.choice(laters_list)
-            call = char_1+char_2+str(random_digit)+char_3+char_4+char_5
-            date_dirty = str(datetime.date.today())
-            #print(date_dirty)
-            date_qso = date_dirty.replace('-','')
-            time_qso = str(strftime("%H%M%S", gmtime()))
-            freq = "21170000"
+    settings = ensure_settings_loaded()
+    if not str(count).isdigit():
+        return
 
-            recordObject = {
-                'QSO_DATE': date_qso,
-                'TIME_ON': time_qso,
-                'FREQ': freq,
-                'CALL': call,
-                'MODE': "SSB",
-                'RST_RCVD': "59",
-                'RST_SENT': "59",
-                'NAME': "Nam",
-                'QTH': "qth",
-                'OPERATOR': settingsDict['my-call'],
-                'BAND': "15M",
-                'COMMENT': "comment",
-                'TIME_OFF': time_qso,
-                'COUNTRY': "country",
-                'ITUZ': "29",
-                'EQSL_QSL_SENT': 'N',
-                'CLUBLOG_QSO_UPLOAD_STATUS': 'N', }
+    letters = 'ABCDEFGHIKLMNOPQRSTVXYZ'
+    digits = '1234567890'
+    records = []
+    for _ in range(int(count)):
+        call = ''.join(random.choice(letters) for _ in range(2))
+        call += random.choice(digits)
+        call += ''.join(random.choice(letters) for _ in range(3))
+        timestamp = datetime.datetime.now(datetime.timezone.utc)
+        record = {
+            'BAND': '15M',
+            'CALL': call,
+            'FREQ': '21.17',
+            'MODE': 'SSB',
+            'OPERATOR': settings.get('my-call', ''),
+            'QSO_DATE': datetime.date.today().strftime('%Y%m%d'),
+            'TIME_ON': timestamp.strftime('%H%M%S'),
+            'RST_RCVD': '59',
+            'RST_SENT': '59',
+            'NAME': 'Nam',
+            'QTH': 'qth',
+            'COMMENTS': 'comment',
+            'TIME_OFF': timestamp.strftime('%H%M%S'),
+            'EQSL_QSL_SENT': 'N',
+            'CLUBLOG_QSO_UPLOAD_STATUS': 'N',
+        }
+        records.append(''.join(_adi_field(field, value) for field, value in record.items()) + '<EOR>\n')
+
+    now = datetime.datetime.now()
+    header = (
+        'ADIF from LinuxLog Generator ADIF v.0.1\n'
+        f'Copyright 2019-{now.year}  Baston V. Sergey\n'
+        f"Header generated on {now} by {settings.get('my-call', '')}\n"
+        'File output restricted to QSOs by : All Operators - All Bands - All Modes\n'
+        '<PROGRAMID:8>LinuxLog\n'
+        '<PROGRAMVERSION:3>0.1\n'
+        '<EOH>\n\n'
+    )
+    output_path = Path(__file__).parent / name_file
+    with output_path.open('w', encoding='utf-8') as output_file:
+        output_file.write(header)
+        output_file.writelines(records)
+
+def load_settings():
+    return config_store.load_settings()
 
 
+def main(argv=None):
+    global settingsDict
+    arguments = sys.argv[1:] if argv is None else argv
+    if not arguments:
+        print("Use 'help' to list commands")
+        return 1
 
-            stringToAdiFile = "<BAND:" + str(len(recordObject['BAND'])) + ">" + recordObject['BAND'] + "<CALL:" + str(
-                    len(recordObject['CALL'])) + ">"
-
-            stringToAdiFile = stringToAdiFile + recordObject['CALL'] + "<FREQ:" + str(len(recordObject['FREQ'])) + ">" + \
-                                  recordObject['FREQ']
-            stringToAdiFile = stringToAdiFile + "<MODE:" + str(len(recordObject['MODE'])) + ">" + recordObject[
-                    'MODE'] + "<OPERATOR:" + str(len(recordObject['OPERATOR']))
-            stringToAdiFile = stringToAdiFile + ">" + recordObject['OPERATOR'] + "<QSO_DATE:" + str(
-                    len(recordObject['QSO_DATE'])) + ">"
-            stringToAdiFile = stringToAdiFile + recordObject['QSO_DATE'] + "<TIME_ON:" + str(
-                   len(recordObject['TIME_ON'])) + ">"
-            stringToAdiFile = stringToAdiFile + recordObject['TIME_ON'] + "<RST_RCVD:" + str(
-                    len(recordObject['RST_RCVD'])) + ">" + recordObject['RST_RCVD']
-            stringToAdiFile = stringToAdiFile + "<RST_SENT:" + str(len(recordObject['RST_SENT'])) + ">" + recordObject[
-                    'RST_SENT'] + "<NAME:" + str(
-                    len(recordObject['NAME'])) + ">" + recordObject['NAME'] + "<QTH:" + str(
-                   len(recordObject['QTH'])) + ">" + recordObject['QTH'] + "<COMMENTS:" + str(
-                    len(recordObject['COMMENT'])) + ">" + recordObject[
-                                       'COMMENT'] + "<TIME_OFF:" + str(len(recordObject['TIME_OFF'])) + ">" + recordObject[
-                                      'TIME_OFF'] + "<EQSL_QSL_SENT:" + str(len(recordObject['EQSL_QSL_SENT'])) + ">" + str(
-                    recordObject['EQSL_QSL_SENT']) + \
-                                 "<CLUBLOG_QSO_UPLOAD_STATUS:" + str(
-                    len(recordObject['CLUBLOG_QSO_UPLOAD_STATUS'])) + ">" + str(
-                    recordObject['CLUBLOG_QSO_UPLOAD_STATUS']) + "<EOR>\n"
-            #print(stringToAdiFile)
-            strings_list.append(stringToAdiFile)
-
-            date = datetime.datetime.now()
-            header_string = "ADIF from LinuxLog Generator ADIF v.0.1 \n"
-            header_string += "Copyright 2019-" + str(date.year) + "  Baston V. Sergey\n"
-            header_string += "Header generated on " + str(datetime.datetime.now()) + " by " + settingsDict['my-call'] + "\n"
-            header_string += "File output restricted to QSOs by : All Operators - All Bands - All Modes \n"
-            header_string += "<PROGRAMID:8>LinuxLog\n"
-            header_string += "<PROGRAMVERSION:" + str(len("0.1")) + ">" + "0.1\n"
-            header_string += "<EOH>\n\n"
-        with open(Path(__file__).parent/name_file, "w") as f:
-            f.write(header_string)
-            f.writelines(strings_list)
-
-parameter = sys.argv[1]
-settingsDict = {}
-file = open(Path(__file__).parent/'settings.cfg', "r")
-for configstring in file:
-    if configstring != '' and configstring != ' ' and configstring[0] != '#':
-        configstring = configstring.strip()
-        configstring = configstring.replace("\r", "")
-        configstring = configstring.replace("\n", "")
-        splitString = configstring.split('=')
-        settingsDict.update({splitString[0]: splitString[1]})
-
-file.close()
-
-print (parameter)
-if parameter == 'reset-country':
-    reset_country_file()
-if parameter == 'csv-country':
-    if sys.argv[2] != '':
-        csv_to_json_country(sys.argv[2])
-if parameter == 'clear-log':
-    if sys.argv[2] != '':
-        delete_all_qso(str(sys.argv[2]).split())
+    parameter = arguments[0]
+    settingsDict = load_settings()
+    if parameter == 'reset-country':
+        reset_country_file()
+    elif parameter == 'csv-country':
+        if len(arguments) < 2:
+            print("CSV filename is required")
+            return 1
+        csv_to_json_country(arguments[1])
+    elif parameter == 'clear-log':
+        if len(arguments) < 2:
+            print("Incorrect name table\nUse utils_linuxlog.py clear-log <table-name>")
+            return 1
+        delete_all_qso(arguments[1])
+    elif parameter == 'generate-adif':
+        if len(arguments) < 3 or not arguments[1].isdigit():
+            print("Usage: utils_linuxlog.py generate-adif <count> <output-file>")
+            return 1
+        generate_adif(arguments[1], arguments[2])
+    elif parameter == 'help':
+        print("RESET COUNTRY\nCommand: python3 utils_linuxlog.py reset-country")
+        print("Create the country file in JSON format.")
+        print("\nCSV COUNTRY\nCommand: python3 utils_linuxlog.py csv-country <csv-file.csv>")
+        print("Convert a semicolon-separated country CSV file to JSON.")
+        print("\nCLEAR LOG\nCommand: python3 utils_linuxlog.py clear-log <table-name>")
+        print("Delete all records (QSOs) from a MySQL table.")
+        print("\nGENERATE ADIF\nCommand: python3 utils_linuxlog.py generate-adif <count> <output-file>")
+        print("Generate random QSOs in an ADIF file.")
     else:
-        print("Incorrect name table \nUse utils_linuxlog.py --clear-log <name table>")
-if parameter == 'generate-adif':
-    if sys.argv[2] != '' and sys.argv[2].isdigit():
-        if sys.argv[3] != '':
-            generate_adif(sys.argv[2],sys.argv[3])
-        else:
-            print("No output filename ")
-    else:
-        print("No 'count' or 'count' not digit")
+        print(f"Unknown command: {parameter}")
+        return 1
+    return 0
 
-if parameter == 'help':
-    print("RESET COUNTRY")
-    print("Command: python3 utils_linuxlog.py reset-country")
-    print("Create file with counrty file in json format.\nUse for testing")
 
-    print("CSV COUNTRY")
-    print("Command: python3 utils_linuxlog.py csv-country <csv-file.csv>")
-    print("Convert csv file with country to JSON country file.\nUse for testing")
-
-    print("CLEAR LOG")
-    print("Command: python3 utils_linuxlog.py clear-log YOU-CALL")
-    print("Delete all records (QSO) from mysql base.")
-
-    print("GENERATE ADIF")
-    print("Command: python3 utils_linuxlog.py generate-adif count name-output-file")
-    print("count - digit how many records generate\n"
-          "Generate random QSO in ADIF file (name-output-file)")
+if __name__ == '__main__':
+    raise SystemExit(main())
