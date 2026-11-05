@@ -1,7 +1,104 @@
 # -*- coding: utf-8 -*-
-"""Helpers for reading ADIF (Amateur Data Interchange Format) files."""
+"""Helpers for reading and normalizing ADIF (Amateur Data Interchange
+Format) files."""
 
+import datetime
+import re
 from pathlib import Path
+
+
+_COLON_TIME_RE = re.compile(
+    r"^\s*(\d{1,2})\s*:\s*(\d{1,2})(?:\s*:\s*(\d{1,2})(?:\.\d+)?)?\s*$"
+)
+_DIGITS_RE = re.compile(r"\D")
+
+
+def normalize_adi_time(value):
+    """Return a valid ADIF time as exactly six digits (``HHMMSS``).
+
+    Real-world ADIF files are not always strict.  This accepts:
+
+    * ``HHMMSS`` and ``HHMM`` / ``HMM`` (seconds default to zero);
+    * five-digit values produced by older exports where the leading zero of
+      the hour was lost (``92700`` -> ``092700``);
+    * ``H:MM`` / ``HH:MM:SS`` (with optional fractional seconds);
+    * ``datetime.time`` / ``datetime.datetime`` and ``datetime.timedelta``
+      values (MySQL ``TIME`` columns are returned as timedeltas).
+
+    Returns an empty string when the value cannot be interpreted.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime.timedelta):
+        seconds = int(value.total_seconds()) % 86400
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}{minutes:02d}{seconds:02d}"
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%H%M%S")
+    if isinstance(value, datetime.time):
+        return value.strftime("%H%M%S")
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    if ":" not in text and "." in text:
+        # Accept values such as ``235959.000`` produced by some exporters.
+        text = text.split(".", 1)[0].strip()
+
+    match = _COLON_TIME_RE.match(text)
+    if match:
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        seconds = int(match.group(3) or 0)
+    elif text.isdigit() and len(text) <= 6:
+        if len(text) <= 2:
+            hours, minutes, seconds = int(text), 0, 0
+        elif len(text) == 3:
+            digits = text.zfill(4)
+            hours, minutes, seconds = int(digits[:2]), int(digits[2:]), 0
+        elif len(text) == 4:
+            hours, minutes, seconds = int(text[:2]), int(text[2:]), 0
+        elif len(text) == 5:
+            # Leading zero of the hour was lost (``92700`` = 09:27:00).
+            digits = text.zfill(6)
+            hours = int(digits[:2])
+            minutes = int(digits[2:4])
+            seconds = int(digits[4:])
+        else:
+            hours = int(text[:2])
+            minutes = int(text[2:4])
+            seconds = int(text[4:])
+    else:
+        return ""
+
+    if hours > 23 or minutes > 59 or seconds > 59:
+        return ""
+    return f"{hours:02d}{minutes:02d}{seconds:02d}"
+
+
+def normalize_adi_date(value):
+    """Return a valid ADIF date as exactly eight digits (``YYYYMMDD``)."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, datetime.date):
+        return value.strftime("%Y%m%d")
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    # Some exporters append a time to the date; the date is the first part.
+    text = text.split()[0]
+    digits = _DIGITS_RE.sub("", text)
+    if len(digits) != 8:
+        return ""
+    try:
+        datetime.date(int(digits[:4]), int(digits[4:6]), int(digits[6:]))
+    except ValueError:
+        return ""
+    return digits
 
 
 def _iter_adi_fields(text):

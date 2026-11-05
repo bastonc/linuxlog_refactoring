@@ -234,9 +234,13 @@ class QrzComApi(QObject):
         error_text = tag_text('Error')
         if error_text is None:
             return {
+                "call": tag_text('call'),
                 "f_name": tag_text('fname'),
                 "s_name": tag_text('name'),
                 "qth": tag_text('addr2'),
+                "grid": tag_text('grid'),
+                "lat": tag_text('lat'),
+                "lon": tag_text('lon'),
             }
         if "Timeout" in error_text or "Invalid" in error_text:
             return {"error": "Invalid key"}

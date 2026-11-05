@@ -4,7 +4,7 @@
 from pathlib import Path
 import re
 from urllib.parse import quote, urlencode, urljoin, urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import std
 import config_store
@@ -58,34 +58,76 @@ class internetWorker(QThread):
         метод загружает изображение с qrz.com
         принимает self.callsign - как позывной
         '''
-        url_found = self.settings['qrz-com']
-
-        # print(self.callsign)
-        parameter_to_byte = urlencode({
-            "tquery": self.callsign or "",
-            "mode": "callsign",
-        }).encode("utf-8")
+        file_name = (self.callsign or "unknown").replace("/", "_").replace("\\", "_")
         data_dictionary = {}
-        try:
-            with urlopen(url_found, data=parameter_to_byte, timeout=20) as response:
-                html = response.read().decode("utf-8", errors="replace")
-            soup = BeautifulSoup(html, 'html.parser')
-            img = soup.find(id="mypic")
-            file_name = (self.callsign or "unknown").replace("/", "_").replace("\\", "_")
-            if not img or not img.get('src'):
+        img = None
+
+        username = str(self.settings.get("qrz-com-username", "") or "").strip()
+        password = str(self.settings.get("qrz-com-password", "") or "").strip()
+
+        # 1. If a QRZ.com account is configured, use the XML API.
+        if username and password:
+            try:
+                import xml.dom.minidom
+                key_url = (
+                    "https://xmldata.qrz.com/xml/?username="
+                    + quote(username, safe="")
+                    + ";password=" + quote(password, safe="")
+                    + ";agent=Linuxlog"
+                )
+                with urlopen(key_url, timeout=20) as response:
+                    key_dom = xml.dom.minidom.parseString(response.read())
+                keys = key_dom.getElementsByTagName("Key")
+                if keys and keys[0].firstChild is not None:
+                    key = keys[0].firstChild.nodeValue
+                    call_url = (
+                        "https://xmldata.qrz.com/xml/current/?s="
+                        + quote(key, safe="")
+                        + ";callsign=" + quote(self.callsign or "", safe="")
+                    )
+                    with urlopen(call_url, timeout=20) as response:
+                        call_dom = xml.dom.minidom.parseString(response.read())
+                    images = call_dom.getElementsByTagName("image")
+                    if images and images[0].firstChild is not None:
+                        image_url = images[0].firstChild.nodeValue.strip()
+                        if image_url:
+                            img = {"src": image_url}
+            except Exception:
+                logger.debug("QRZ.com API image lookup failed", exc_info=True)
                 img = None
-            elif img['src'].split('/')[-1] == self.settings['qrz-none']:
+
+        # 2. Otherwise (or if the API did not return an image) parse the
+        # public QRZ.com callsign page.  The old "/lookup" POST endpoint is
+        # blocked by QRZ.com, so use the public "/db/<callsign>" page.
+        if img is None:
+            try:
+                from urllib.request import Request
+                call_url = "https://www.qrz.com/db/" + quote(self.callsign or "", safe="")
+                request = Request(call_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urlopen(request, timeout=20) as response:
+                    html = response.read().decode("utf-8", errors="replace")
+                soup = BeautifulSoup(html, "html.parser")
+                found = soup.find(id="mypic")
+                if found and found.get("src"):
+                    if found["src"].split("/")[-1] != self.settings.get("qrz-none", ""):
+                        img = found
+            except Exception:
+                logger.debug("QRZ.com page parsing failed", exc_info=True)
                 img = None
-        except Exception:
-            logger.debug("QRZ image lookup failed; trying the fallback service", exc_info=True)
-            img = None
 
         try:
             if img:
-                image_url = urljoin(url_found, img['src'])
+                image_url = img['src']
                 if urlsplit(image_url).scheme not in {"http", "https"}:
                     raise ValueError("Unsupported image URL scheme")
-                with urlopen(image_url, timeout=20) as response:
+                image_request = Request(
+                    image_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Referer": "https://www.qrz.com/",
+                    },
+                )
+                with urlopen(image_request, timeout=20) as response:
                     content_length = response.headers.get("Content-Length")
                     if content_length and int(content_length) > 20 * 1024 * 1024:
                         raise ValueError("Image exceeds 20 MiB limit")
@@ -96,8 +138,7 @@ class internetWorker(QThread):
                 image_path.write_bytes(image_data)
                 data_dictionary.update({'img': str(image_path)})
             else:
-                dict_qrz_ru = self.search_qrz_ru()
-                data_dictionary.update({'name': dict_qrz_ru['name'], 'qth': dict_qrz_ru['qth'], 'loc': dict_qrz_ru['loc']})
+                data_dictionary.update({'img': None})
 
         # print(data_dictionary)
         except Exception:

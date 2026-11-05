@@ -1,8 +1,28 @@
+import re
 import socket
-from operator import truediv
 from threading import Lock
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+SPOT_TIME_RE = re.compile(r"\b\d{4}Z\b", re.IGNORECASE)
+
+
+def _clean_cluster_line(raw_line):
+    """Remove ANSI/control characters and surrounding whitespace."""
+    line = ANSI_ESCAPE_RE.sub("", raw_line)
+    line = CONTROL_CHAR_RE.sub("", line)
+    return line.strip()
+
+
+def _is_spot_line(line):
+    """Return True for DX spot lines, including ones with a trailing comment."""
+    upper = line.upper()
+    if not upper.startswith("DX"):
+        return False
+    return upper.startswith("DX DE ") or bool(SPOT_TIME_RE.search(upper))
 
 
 class ClusterThread(QThread):
@@ -10,7 +30,7 @@ class ClusterThread(QThread):
     reciev_string_signal = pyqtSignal(object)
     connected_signal = pyqtSignal()
     disconnected_signal = pyqtSignal()
-    bell_bell_signal = pyqtSignal()
+    bell_bell_signal = pyqtSignal(object)
 
     def __init__(self, settings_dict, parent=None):
         super().__init__(parent)
@@ -58,9 +78,14 @@ class ClusterThread(QThread):
 
     def _read_connection(self, connection):
         buffer = ""
-        logged_in = False
         self.cluster_connect_flag = False
         connection.settimeout(1)
+
+        # Send the callsign right away.  Some clusters prompt for it, others
+        # accept it as the first command; both variants work this way.
+        connection.sendall((self.call + "\n").encode("ascii", errors="ignore"))
+        self.cluster_connect_flag = True
+        self.connected_signal.emit()
 
         while not self._stop_requested:
             try:
@@ -71,27 +96,19 @@ class ClusterThread(QThread):
                 raise ConnectionError("Telnet server closed the connection")
 
             buffer += received.decode(self.settings_dict['encodeStandart'], errors="ignore")
-            if not logged_in:
-                prompt = buffer.lower()
-                if "login:" in prompt or "please enter your call:" in prompt:
-                    connection.sendall((self.call + "\n").encode("ascii"))
-                    logged_in = True
-                    self.cluster_connect_flag = True
-                    self.connected_signal.emit()
             lines = buffer.split("\n")
             buffer = lines.pop()
             for raw_line in lines:
-                beep = False
-                if raw_line.endswith(""):
-                    beep = True
-                line = raw_line.rstrip("\r")
+                # A trailing BEL is used by some clusters to mark a needed
+                # spot; keep the line itself free of control characters.
+                beep = "\x07" in raw_line
+                line = _clean_cluster_line(raw_line)
                 if not line:
                     continue
-                print(logged_in, bytes(raw_line))
-                if logged_in and line.startswith("DX") and line.endswith("Z"):
+                if _is_spot_line(line):
                     self.reciev_spot_signal.emit(line)
                     if beep:
-                        self.bell_bell_signal.emit()
+                        self.bell_bell_signal.emit(line)
                 else:
                     self.reciev_string_signal.emit(
                         line.encode(self.settings_dict['encodeStandart'], errors="ignore")

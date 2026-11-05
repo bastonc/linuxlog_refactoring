@@ -94,6 +94,8 @@ class std:
 
     def std_freq(self, freq):   # get format freq in Hz (Ex.14000000)
         frequency_text = str(freq).strip().replace(",", ".")
+        frequency_text = re.sub(r"\s*(?:hz|khz|mhz)\s*$", "", frequency_text, flags=re.IGNORECASE)
+        # Normalize grouped values such as 14.074.000 (Hz) before parsing.
         if re.fullmatch(r"\d{1,3}(?:\.\d{3}){2,}", frequency_text):
             frequency_text = frequency_text.replace(".", "")
         try:
@@ -103,10 +105,22 @@ class std:
         if not frequency.is_finite() or frequency < 0:
             return ""
 
-        # Cluster spots are commonly sent in MHz with a decimal point, while
-        # integer values of 4-6 digits are commonly kHz and 7+ digits are Hz.
+        # DX clusters usually send spots in kHz ("14074.0"), while ADIF uses
+        # MHz ("14.074") and CAT/TCI use Hz ("14074000").  Values below
+        # 1000 are MHz; values with a decimal point and 4+ digits before it
+        # are kHz; everything else below 1 MHz is also kHz.
         if frequency < 1_000_000:
-            if "." in frequency_text or len(frequency_text.lstrip("0")) <= 3:
+            integer_part = frequency_text.split(".", 1)[0].lstrip("0") or "0"
+            integer_digits = len(integer_part)
+            # "14.074", "144.174" and "1296.0" are MHz; "3500.0",
+            # "14074.0" and "144174.0" are kHz.  Integer values with up to
+            # three digits are MHz, the rest are kHz.
+            looks_like_mhz = integer_digits <= 3 or (
+                integer_digits == 4 and frequency < 1800
+            )
+            if ("." in frequency_text and looks_like_mhz) or (
+                "." not in frequency_text and integer_digits <= 3
+            ):
                 frequency *= 1_000_000
             else:
                 frequency *= 1_000
