@@ -140,7 +140,7 @@ class internetWorker(QThread):
             else:
                 data_dictionary.update({'img': None})
 
-        # print(data_dictionary)
+        # logger.debug(data_dictionary)
         except Exception:
             logger.warning("Unable to retrieve callsign information from QRZ services", exc_info=True)
 
@@ -153,7 +153,7 @@ class internetWorker(QThread):
             "agent": "LinuxLog",
         }).encode("utf-8")
         with urlopen("http://api.qrz.ru/login", data=login_data, timeout=20) as response:
-            print("QRZ_RU status:", response.status)
+            logger.debug("QRZ_RU status:", response.status)
             html = response.read().decode("utf-8", errors="replace")
         "http: // api.qrz.ru / login?u = < username > & p = < password > & agent = < agent >"
         soup = BeautifulSoup(html, 'xml')
@@ -172,20 +172,20 @@ class internetWorker(QThread):
         }).encode("utf-8")
 
         with urlopen(url_found_qrz_ru, data=parameter_to_byte, timeout=20) as response:
-            print("QRZ_RU status:", response.status)
+            logger.debug("QRZ_RU status:", response.status)
             html = response.read().decode("utf-8", errors="replace")
-        #print("QRZ_RU html:", html)
+        #logger.debug("QRZ_RU html:", html)
         soup = BeautifulSoup(html, 'html.parser')
         info_block = soup.find(id="infoBlock")
         name_clear = info_block.b.text.split(" ")[0]
-        print("QRZ_RU html:", name_clear)
+        logger.debug("QRZ_RU html:", name_clear)
         content_div_dirty = info_block.div.text.split(" ")
         content_div=[]
         for content_elem in content_div_dirty:
             if content_elem !='':
                 content_div.append(content_elem)
 
-        print("QRZ_RU QTH:", content_div)
+        logger.debug("QRZ_RU QTH:", content_div)
         qth_clear = content_div[3].replace(',','')
         loc_clear = content_div[6].replace("#", '').replace("\n", '')
         out_dict.update({'name': name_clear, 'qth': qth_clear, 'loc': loc_clear})

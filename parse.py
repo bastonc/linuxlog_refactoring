@@ -5,6 +5,7 @@ Format) files."""
 import datetime
 import re
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
 _COLON_TIME_RE = re.compile(
@@ -13,7 +14,7 @@ _COLON_TIME_RE = re.compile(
 _DIGITS_RE = re.compile(r"\D")
 
 
-def normalize_adi_time(value):
+def normalize_adi_time(value: Any) -> str:
     """Return a valid ADIF time as exactly six digits (``HHMMSS``).
 
     Real-world ADIF files are not always strict.  This accepts:
@@ -77,7 +78,7 @@ def normalize_adi_time(value):
     return f"{hours:02d}{minutes:02d}{seconds:02d}"
 
 
-def normalize_adi_date(value):
+def normalize_adi_date(value: Any) -> str:
     """Return a valid ADIF date as exactly eight digits (``YYYYMMDD``)."""
     if value is None:
         return ""
@@ -166,7 +167,7 @@ def parseStringAdi(string, adi_fields_standart=None, settings_dict=None):
     return tags
 
 
-def getAllRecord(poles, filename, key=""):
+def getAllRecord(poles: List[str], filename: str, key: str = "") -> List[Dict[str, str]]:
     """Read an ADIF file and return its QSO records.
 
     Parsing is record based rather than line based, as valid ADIF files may

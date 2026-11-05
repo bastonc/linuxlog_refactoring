@@ -2,6 +2,7 @@ from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 import re
+from typing import Any, Tuple, Union
 
 from PyQt6.QtWidgets import QMessageBox, QLineEdit, QWidget, QLabel, QPushButton, \
     QVBoxLayout, QApplication
@@ -41,7 +42,7 @@ class std:
     def __init__(self):
         self.band_rules = _load_band_rules().copy()
 
-    def mode_band_plan(self, band, freq):
+    def mode_band_plan(self, band: str, freq: Any) -> Union[str, Tuple[str, str]]:
         try:
             if int(self.band_rules["start-cw"+band]) < int(freq) <= int(self.band_rules["end-cw"+band]):
                 mode = "CW"
@@ -78,7 +79,7 @@ class std:
                 index_columns[column] = index
         return index_columns
 
-    def get_std_band(self, freq):  # get Band in m
+    def get_std_band(self, freq: Any) -> str:  # get Band in m
         try:
             normalized_frequency = self.std_freq(freq)
             if not normalized_frequency:
@@ -92,7 +93,7 @@ class std:
                 return band
         return "GEN"
 
-    def std_freq(self, freq):   # get format freq in Hz (Ex.14000000)
+    def std_freq(self, freq: Any) -> str:   # get format freq in Hz (Ex.14000000)
         frequency_text = str(freq).strip().replace(",", ".")
         frequency_text = re.sub(r"\s*(?:hz|khz|mhz)\s*$", "", frequency_text, flags=re.IGNORECASE)
         # Normalize grouped values such as 14.074.000 (Hz) before parsing.

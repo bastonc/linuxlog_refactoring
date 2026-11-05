@@ -1,3 +1,4 @@
+import logging
 import socket
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ import config_store
 import traceback
 import parse
 import shutil
+from services.qso_repository import QsoRepository
 import std
 import json
 from qth_locator import normalize_locator
@@ -52,6 +54,9 @@ THEMES = {
         "solid-color": "#3f7f55",
     },
 }
+
+logger = logging.getLogger(__name__)
+
 
 class Menu (QWidget):
     def __init__(self, db, app_env, settingsDict, telnetCluster, logForm, logSearch,
@@ -815,12 +820,12 @@ class Menu (QWidget):
         if confirm_dialog == QMessageBox.StandardButton.Yes:
             delete_result = self.db_sql.delete_all_qso()
             self.logWindow.refresh_data()
-            print(f"Delete {delete_result}")
+            logger.debug(f"Delete {delete_result}")
 
 
     def context_country(self, point):
         context_country = QMenu()
-        #print(self.country_table.currentRow())
+        #logger.debug(self.country_table.currentRow())
         index_row = self.country_table.currentRow()
         #if self.country_table.itemAt(point):
         delete_country = QAction("Delete country", context_country)
@@ -829,7 +834,7 @@ class Menu (QWidget):
         context_country.exec_(self.country_table.mapToGlobal(point))
 
     def country_del(self, index_row):
-        #print("delete country", index_row)
+        #logger.debug("delete country", index_row)
         self.country_table.removeRow(index_row)
 
     def add_country_row(self):
@@ -960,10 +965,10 @@ class Menu (QWidget):
     def search_country(self):
         country = self.country_found.text().strip().lower()
         pfx = self.pfx_found.text().strip().lower()
-        print(pfx)
+        logger.debug(pfx)
 
         for i in range(self.country_table.rowCount()):
-            #print(country, self.country_table.item(i, 0).text())
+            #logger.debug(country, self.country_table.item(i, 0).text())
             if self.country_table.item(i,0).text().lower() == country:
                 self.country_table.scrollToItem(self.country_table.item(i,0))
                 self.country_table.item(i, 0).setBackground(
@@ -994,7 +999,7 @@ class Menu (QWidget):
                 allRecords = parse.getAllRecord(self.allCollumn, fname, key="import")
                 self.logWindow.load_bar.show()
                 all_records_count = len(allRecords)
-                db_importer = main.Db(self.settingsDict)
+                db_importer = QsoRepository(self.settingsDict)
                 for i, qso_in_file in enumerate(allRecords):
                     qso_date = parse.normalize_adi_date(qso_in_file.get("QSO_DATE"))
                     time_on = parse.normalize_adi_time(qso_in_file.get("TIME_ON"))
@@ -1049,7 +1054,7 @@ class Menu (QWidget):
             if not file_name.lower().endswith(".adi"):
                 file_name += ".adi"
 
-            allRecords = main.Db(self.settingsDict).get_all_records()
+            allRecords = QsoRepository(self.settingsDict).all_records()
             main.Adi_file(self.app_env.appVersion(), self.settingsDict).record_dict_qso(
                 list_data=allRecords,
                 fields_list=self.table_columns,
@@ -1091,7 +1096,7 @@ class Menu (QWidget):
         self.export_clublog_button.setEnabled(True)
 
     def start_calibrate_cluster(self):
-       # print("start_calibrate_cluster:_>", self.settingsDict)
+       # logger.debug("start_calibrate_cluster:_>", self.settingsDict)
        self.telnetCluster.stop_cluster()
        if hasattr(self, "cluster") and self.cluster.isRunning():
            self.cluster.stop()
@@ -1373,8 +1378,8 @@ class Menu (QWidget):
                     cq_zone = self.country_table.item(i, 3).text()
                     data_object.update({country: {'prefix': pfx_list_clean,'itu': itu,'cq-zone': cq_zone }})
             except Exception:
-                print("Exception in update country list str: 1149")
-            #print(data_object)
+                logger.debug("Exception in update country list str: 1149")
+            #logger.debug(data_object)
 
         with open(Path(__file__).parent/self.settingsDict['country-file'], 'w') as f:
             json.dump(data_object, f)
