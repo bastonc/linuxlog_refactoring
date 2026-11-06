@@ -18,7 +18,7 @@ import ext
 import cat
 from pathlib import  Path
 import PyQt6.QtCore
-from PyQt6.QtWidgets import QApplication, QProgressBar, QCheckBox, QMenu, QMessageBox, \
+from PyQt6.QtWidgets import QApplication, QInputDialog, QProgressBar, QCheckBox, QMenu, QMessageBox, \
     QWidget, \
     QMainWindow, QTableWidget, QTabWidget, QTableWidgetItem, \
     QLineEdit, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QComboBox, QPlainTextEdit, QFrame, \
@@ -248,7 +248,10 @@ class SortableQTableWidgetItem(QTableWidgetItem):
 
 class Settings_file:
     def update_file_to_disk(self):
-        return config_store.update_settings(self.settingsDict)
+        settings = getattr(self, "settings_dict", None)
+        if settings is None:
+            settings = getattr(self, "settingsDict", {})
+        return config_store.update_settings(settings)
 
 
 class Adi_file:
@@ -2643,6 +2646,9 @@ class LogForm(QMainWindow):
         logSearch_geometry = logSearch.geometry()
         logForm_geometry = logForm.geometry()
         telnetCluster_geometry = telnetCluster.geometry()
+        qth_map_window = getattr(self, "qth_map", None)
+        if qth_map_window is not None:
+            qth_map_geometry = qth_map_window.geometry()
         self.parameter.update({'search-internet-left': str(internetSearch_geometry.left()),
                                'search-internet-top': str(internetSearch_geometry.top()),
                                'search-internet-width': str(internetSearch_geometry.width()),
@@ -2666,8 +2672,15 @@ class LogForm(QMainWindow):
                                'log-search-window': str(logSearch.isVisible()),
                                'telnet-cluster-window': str(telnetCluster.isVisible()),
                                'search-internet-window': str(internetSearch.isVisible()),
-
+                               'qth-map-window': str(qth_map_window.isVisible()) if qth_map_window is not None else 'False',
                                })
+        if qth_map_window is not None:
+            self.parameter.update({
+                'qth-map-window-left': str(qth_map_geometry.left()),
+                'qth-map-window-top': str(qth_map_geometry.top()),
+                'qth-map-window-width': str(qth_map_geometry.width()),
+                'qth-map-window-height': str(qth_map_geometry.height()),
+            })
         return self.parameter
 
     def save_coordinate_to_new_profile(self):
@@ -2703,9 +2716,7 @@ class LogForm(QMainWindow):
         self.remember_in_cfg(self.param)
         self.settings_dict['active-profile'] = name
         self.update_cordinates()
-        self.profile_name = QAction(name)
-        self.profile_name.triggered.connect(partial(self.set_active_profile, self.settings_dict['active-profile']))
-        self.profiles.addAction(self.profile_name)
+        self.profile_update_menu()
 
     def trx_enable(self, parameter):
         if parameter == 'rx':
@@ -2736,6 +2747,21 @@ class LogForm(QMainWindow):
         telnetCluster.refresh_interface()
         internetSearch.refresh_interface()
         logForm.refresh_interface()
+        qth_map_window = getattr(logForm, "qth_map", None)
+        if qth_map_window is not None:
+            try:
+                qth_map_window.setGeometry(
+                    int(self.settings_dict.get("qth-map-window-left", qth_map_window.x())),
+                    int(self.settings_dict.get("qth-map-window-top", qth_map_window.y())),
+                    int(self.settings_dict.get("qth-map-window-width", qth_map_window.width())),
+                    int(self.settings_dict.get("qth-map-window-height", qth_map_window.height())),
+                )
+            except (TypeError, ValueError):
+                pass
+            if self.settings_dict.get("qth-map-window") == "True":
+                qth_map_window.show()
+            else:
+                qth_map_window.hide()
 
     def change_profile(self, text):
         logger.debug(text)
@@ -2982,15 +3008,16 @@ class LogForm(QMainWindow):
         self.profile_name.triggered.connect(self.save_coordinate_to_new_profile)
         self.profile_save = QAction("Save profile", self)
         self.profile_save.triggered.connect(self.save_coordinate_to_profile)
+        self.profile_delete = QAction("Delete profile", self)
+        self.profile_delete.triggered.connect(self.delete_profile)
         self.profiles = QMenu("Profiles")
         self.profiles.setStyleSheet(
             "QWidget{font: 10px; background-color: " + self.settings_dict['background-color'] + "; color: " + self.settings_dict[
                 'color'] + ";}")
 
-        # self.profiles.addSection()
         self.profiles.addAction(self.profile_name)
         self.profiles.addAction(self.profile_save)
-        self.profiles.addSeparator()
+        self.profiles.addAction(self.profile_delete)
         self.profiles.addSeparator()
         # self.profiles.addAction()
         exit_menu = QAction("Exit", self)
@@ -3043,25 +3070,24 @@ class LogForm(QMainWindow):
         self.eqsl_inbox_window = eqsl_inbox.EqslWindow(settings_dict=self.settings_dict, db=db, log_window=logWindow)
 
     def profile_update_menu(self):
-        profiles = json.loads(self.settings_dict["coordinate-profile"])
-        profile_action_list = []
+        try:
+            profiles = json.loads(self.settings_dict["coordinate-profile"])
+        except (json.JSONDecodeError, TypeError):
+            profiles = []
         self.profiles.clear()
         self.profiles.addAction(self.profile_name)
         self.profiles.addAction(self.profile_save)
-        self.profiles.addSeparator()
+        self.profiles.addAction(self.profile_delete)
         self.profiles.addSeparator()
         for profile in profiles:
-            tmp_profile = QAction(profile['name'], self)
-            # tmp_profile.setChecked(True)
-            tmp_profile.setCheckable(True)
-            if profile['name'] == self.settings_dict['active-profile']:
-                tmp_profile.setChecked(True)
-            else:
-                tmp_profile.setChecked(False)
-            tmp_profile.triggered.connect(partial(self.set_active_profile, profile['name']))
-            profile_action_list.append(tmp_profile)
-        for profile_action in profile_action_list:
-            self.profiles.addAction(profile_action)
+            name = profile.get("name")
+            if not name:
+                continue
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name == self.settings_dict.get("active-profile"))
+            action.triggered.connect(partial(self.set_active_profile, name))
+            self.profiles.addAction(action)
 
     def set_active_profile(self, name):
         # logger.debug(name)
@@ -3070,6 +3096,31 @@ class LogForm(QMainWindow):
         # logger.debug("self.settings_dict['active-profile']: ", self.settings_dict['active-profile'])
         Settings_file.update_file_to_disk(self)
         self.update_cordinates()
+        self.profile_update_menu()
+
+    def delete_profile(self):
+        try:
+            profiles = json.loads(self.settings_dict["coordinate-profile"])
+        except (json.JSONDecodeError, TypeError):
+            profiles = []
+        names = [p.get("name") for p in profiles if p.get("name")]
+        if not names:
+            return
+        name, ok = QInputDialog.getItem(self, "Delete profile", "Profile:", names, 0, False)
+        if not ok or not name:
+            return
+        profiles = [p for p in profiles if p.get("name") != name]
+        json_string = json.dumps(profiles)
+        self.settings_dict["coordinate-profile"] = json_string
+        self.param = {"coordinate-profile": json_string, "active-profile": self.settings_dict.get("active-profile")}
+        self.remember_in_cfg(self.param)
+        if self.settings_dict.get("active-profile") == name:
+            if profiles:
+                self.settings_dict["active-profile"] = profiles[0].get("name")
+            else:
+                self.settings_dict["active-profile"] = ""
+        Settings_file.update_file_to_disk(self)
+        self.profile_update_menu()
 
     def menu_add(self, name_menu):
         # diplom
