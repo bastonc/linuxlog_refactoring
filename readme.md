@@ -1,8 +1,8 @@
 <div style="display: inline-flex; align-items: center; gap: 10px;" flex-wrap: nowrap;>
     <img width="128" height="128" alt="HAM Logger for Linux - Linuxlog" style="width: 50px; height: 50px;" src="https://github.com/user-attachments/assets/90b187bd-56d7-4d26-b582-de6515c81ed0" />
-    <h1 style="margin: 0; font-size: 24px;">LinuxLog  - ham logger for amateur radio station</h1>
+    <h1 style="margin: 0; font-size: 24px;">LinuxLog  - Ham logger for Linux</h1>
 </div>
-<p>This is a ham logger for the "lazy" amateur radio operator. It allows you to keep a log for everyday radio communications.</p>
+<p>This is a Linux ham logger for "lazy" amateur radio operator. It allows you to keep a log for everyday radio communications.</p>
 <p>This logbook is also for radio amateurs who use the Linux operating system and need a simple, functional logbook.</p>
 <p>There are no features for contestmans in this log, as I personally don't participate in contests and don't know exactly what's needed for contests. And so far, no contestmans has been able to clearly describe the specific functionality for contests.</p>
 <hr>
@@ -29,13 +29,15 @@
   <li><strong>Frequency control</strong> frequency control with memory</li>
   <li><strong>Multi window</strong> interface. This allows you to arrange windows as you see fit. It features window coordinate memory, as well as presets that can be saved for different desktop situations.</li>
   <li><strong>Color control</strong> interface. This allows you to adapt Linuxlog to your interface.</li>
+    <li><strong>QTH-locator map</strong> view distance to corespondent</li>
 </ul>
 <p><i>If you have any ideas for this logbook for Linux - please write to bastonsv@gmail.com</i> </p>
 
-
+<img width="1920" height="1080" alt="Linuxlog - ham logger for Linux" src="https://github.com/user-attachments/assets/88cbb30d-c3bc-4f95-ae7d-0adba9143751" />
 <img width="1920" height="1080" alt="Linuxlog - ham radio logger Linux OS" src="https://github.com/user-attachments/assets/e00bc01d-d27b-4ff9-bd1c-e0a8d34d5131" />
-<img width="1680" height="1050" alt="Linuxlog - ham radio logger for Ubunt, Fedora, Manjaro" src="https://github.com/user-attachments/assets/19904624-2e91-44fd-a7d6-8e2c89fd4eb5" />
+<img width="1680" height="1050" alt="Linuxlog - ham radio logger for Ubuntu, Fedora, Manjaro" src="https://github.com/user-attachments/assets/19904624-2e91-44fd-a7d6-8e2c89fd4eb5" />
 <img width="1680" height="1050" alt="linuxlog3" src="https://github.com/user-attachments/assets/7714fe6a-0ac7-4d42-a32d-bcaabcede2c7" />
+
 <hr>
 <p> If you are using a Linux distribution other than Fedora/Ubuntu/Manjaro, install it as follows:
 <ol>
@@ -44,4 +46,5 @@
     <li>Install all dependencies <code>pip install -r requirements.txt</code></li>
     <li>Create a .desktop file for the applications menu and copy it to ~/.local/share/applications/</li>
     <li>To connect to the database, enter the appropriate values ​​for your DB server in the settings.cfg file for the db-host, db-user, db-pass, db-name fields.</li>
+    
 </ol>
