@@ -1432,6 +1432,7 @@ class Menu (QWidget):
             'cluster-filter-mode': self.settingsDict.get('cluster-filter-mode', ''),
             'cluster-filter-presence': self.settingsDict.get('cluster-filter-presence', 'all'),
             'theme': self.settingsDict.get('theme', 'Dark'),
+            'cluster-beep-enabled': self.settingsDict.get('cluster-beep-enabled', 'enable'),
         })
         self.close()
 

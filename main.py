@@ -2029,10 +2029,11 @@ class About_window(QWidget):
         self.capture.setStyleSheet("font-size: 18px")
         self.capture.setFixedHeight(30)
         self.text = QLabel(self.text_string)
+        self.text.setOpenExternalLinks(True)
         # self.text.setFixedHeight(200)
         self.text.setStyleSheet("font-size: 12px")
         self.about_layer = QVBoxLayout()
-        self.image = QPixmap("logo.png")
+        self.image = QPixmap(f"{Path(__file__).parent}/logo.png")
         self.image_label = QLabel(self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setPixmap(self.image)
@@ -3487,6 +3488,7 @@ class LogForm(QMainWindow):
 
         if CYRILLIC_UPPER_RE.search(text):
             self.inputCall.setText(self.key_lay_reverse(self.inputCall.text()))
+            text = self.inputCall.text().strip()
         if len(text) > 2:
             country = self.get_country(text)
             if country:
@@ -3513,7 +3515,7 @@ class LogForm(QMainWindow):
             self.logSearch.clear_table()
             publish("qth.map.update", "")
         elif len(text) >= 2:
-            publish("qth.map.update", text)
+            publish("qth.map.update", self.inputCall.text().strip())
 
     def _run_call_lookup(self):
         call = self._pending_lookup
@@ -4389,7 +4391,7 @@ class TelnetCluster(QWidget):
         self.tableWidget = QTableWidget()
         self.allRows = 0
         self.all_spots = []
-        self._beep_enabled = True
+        self._beep_enabled = self.settings_dict.get("cluster-beep-enabled", "enable") == "enable"
         self._beep_available = True
         self._beep_warning_shown = False
         self._beep_filter_enabled = False
@@ -4443,15 +4445,17 @@ class TelnetCluster(QWidget):
         self.tableWidget.cellClicked.connect(self.click_to_spot)
         # Beep switch and beeper filter
         button_style = "font-size: 9px;"
-        self.sound_button = QPushButton("Beep: ON")
+        self.sound_button = QPushButton("Beep: ON" if self._beep_enabled else "Beep: OFF")
         self.sound_button.setCheckable(True)
-        self.sound_button.setChecked(True)
+        self.sound_button.setChecked(self._beep_enabled)
         self.sound_button.setMinimumWidth(60)
         self.sound_button.setFixedHeight(18)
         self.sound_button.setStyleSheet(button_style)
         self.sound_button.setToolTip("Enable or disable cluster spot beeps")
         self.sound_button.toggled.connect(self.set_cluster_sound)
-        self.sound_button.setStyleSheet("font-size: 9px; background-color: #2e7d32; color: white;")
+        self.sound_button.setStyleSheet(
+            "font-size: 9px; background-color: " + ("#2e7d32" if self._beep_enabled else "#7f1d1d") + "; color: white;"
+        )
 
         self.beep_filter_button = QPushButton("Beep filter: OFF")
         self.beep_filter_button.setMinimumWidth(60)
@@ -4755,7 +4759,10 @@ class TelnetCluster(QWidget):
         self.set_telnet_wrong(text="· Telnet")
 
     def closeEvent(self, event):
+        self.settings_dict["cluster-beep-enabled"] = "enable" if self._beep_enabled else "disable"
         self.stop_cluster()
+        if self.run_cluster.isRunning():
+            self.run_cluster.wait(4000)
         event.accept()
 
     def start_cluster(self):
@@ -5086,6 +5093,7 @@ class TelnetCluster(QWidget):
         self.sound_button.setStyleSheet(
             "font-size: 9px; background-color: " + ("#2e7d32" if self._beep_enabled else "#7f1d1d") + "; color: white;"
         )
+        self.settings_dict["cluster-beep-enabled"] = "enable" if self._beep_enabled else "disable"
         if self._beep_enabled:
             # Allow an immediate retry after an audio-device failure.
             self._beep_available = True
@@ -5267,6 +5275,7 @@ class InternetSearch(QWidget):
 
     def initUI(self):
         self.hbox = QHBoxLayout(self)
+        self.hbox.setContentsMargins(26, 18, 10, 10)
         self.pixmap = QPixmap(f"{Path(__file__).parent}/logo.png")
         self.labelImage = QLabel(self)
         self.labelImage.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -5294,8 +5303,8 @@ class InternetSearch(QWidget):
         if image_path is None:
             image_path = Path(__file__).parent/"logo.png"
         pixmap = QPixmap(image_path)
-        width = max(1, int(self.settings_dict['search-internet-width']) - 20)
-        height = max(1, int(self.settings_dict['search-internet-height']) - 20)
+        width = max(1, int(self.settings_dict['search-internet-width']) - 36)
+        height = max(1, int(self.settings_dict['search-internet-height']) - 28)
         self.labelImage.setPixmap(
             pixmap.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio)
         )
@@ -5454,6 +5463,7 @@ class settings_file:
             'cluster-filter-mode': settingsDict.get('cluster-filter-mode', ''),
             'cluster-filter-presence': settingsDict.get('cluster-filter-presence', 'all'),
             'theme': settingsDict.get('theme', 'Dark'),
+            'cluster-beep-enabled': settingsDict.get('cluster-beep-enabled', 'enable'),
         })
         return result
 
@@ -6020,10 +6030,18 @@ if __name__ == '__main__':
     for problem in config_store.validate_settings(settingsDict):
         logger.warning("Configuration problem: %s", problem)
 
+    from app_context import AppContext
+    app_context = AppContext(settings=settingsDict)
+
     ####
     os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
+    app.setApplicationName("LinuxLog")
+    app.setApplicationDisplayName("LinuxLog")
+    app.setDesktopFileName("linuxlog")
+    app.setWindowIcon(QIcon(str(Path(__file__).parent / 'logo.png')))
     settingsDict.update({"app":app})
+    app_context.app = app
     flag = 1
     if settingsDict['my-call'] == "":
         hello_window = hello_window(table_columns)
@@ -6057,6 +6075,11 @@ if __name__ == '__main__':
         qthMap = qth_map.QTHMapWindow(settingsDict)
         logForm = LogForm(settingsDict, logSearch)
         logForm.qth_map = qthMap
+        app_context.log_window = logWindow
+        app_context.log_search = logSearch
+        app_context.internet_search = internetSearch
+        app_context.qth_map = qthMap
+        app_context.log_form = logForm
 
         def _update_qth_map_from_event(payload):
             if isinstance(payload, dict):
@@ -6068,9 +6091,10 @@ if __name__ == '__main__':
 
         subscribe("qth.map.update", _update_qth_map_from_event)
         telnetCluster = TelnetCluster(settingsDict)
+        app_context.telnet_cluster = telnetCluster
         tci_recv = tci.tci_connect(settingsDict, log_form=logForm)
         about_window = About_window("LinuxLog",
-                                    "Version: " + APP_VERSION + "<br><a href='http://linuxlog.com.ua'>http://linuxlog.com.ua</a><br>Baston Sergey<br>UR4LGA<br>bastonsv@gmail.com")
+                                    "Version: " + APP_VERSION + "<br><a href='https://github.com/bastonc/linuxlog-2_5#linuxlog----ham-logger-for-amateur-radio-station'>LinuxLog on GitHub</a><br>Baston Sergey<br>UR4LGA<br>bastonsv@gmail.com")
         env_dict = {
             "APP_VERSION": APP_VERSION
         }
