@@ -1,14 +1,18 @@
-#import telnetlib
+import logging
+import socket
 import time
 from pathlib import Path
 
 import main
 import internetworker
+import config_store
 import traceback
 import parse
 import shutil
+from services.qso_repository import QsoRepository
 import std
 import json
+from qth_locator import normalize_locator
 from PyQt6.QtWidgets import QMenu, QApplication, QWidget, QMainWindow, QTableView, QTableWidget, QTableWidgetItem, \
     QTextEdit, \
     QLineEdit, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QComboBox, QFrame, QSizePolicy
@@ -20,12 +24,47 @@ from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtCore import QThread
 from time import gmtime, strftime, localtime
 
+THEMES = {
+    "Dark": {
+        "background-color": "#08131f",
+        "color": "#c0bfbc",
+        "form-background": "#102033",
+        "color-table": "#d7e3f0",
+        "solid-color": "#2b4a66",
+    },
+    "Light": {
+        "background-color": "#f2f2f2",
+        "color": "#1f1f1f",
+        "form-background": "#ffffff",
+        "color-table": "#1f1f1f",
+        "solid-color": "#9aa0a6",
+    },
+    "Blue": {
+        "background-color": "#0b1f3a",
+        "color": "#d8e6ff",
+        "form-background": "#122b4f",
+        "color-table": "#eaf1ff",
+        "solid-color": "#3a6ea5",
+    },
+    "Green": {
+        "background-color": "#0f2418",
+        "color": "#d9f0df",
+        "form-background": "#173525",
+        "color-table": "#eaf7ed",
+        "solid-color": "#3f7f55",
+    },
+}
+
+logger = logging.getLogger(__name__)
+
+
 class Menu (QWidget):
     def __init__(self, db, app_env, settingsDict, telnetCluster, logForm, logSearch,
                  logWindow, internetSearch, tci_recv, tci_sndr, table_columns, parent=None):
         super(Menu, self).__init__(parent)
         self.db_sql = db
         self.settingsDict = settingsDict
+        self._clublog_workers = {}
         self.label_style = "font: 12px;"
         self.initUI()
         self.initData()
@@ -58,7 +97,6 @@ class Menu (QWidget):
         self.tab.setUsesScrollButtons(False)
         self.general_tab = QWidget()
 
-        self.cluster_tab = QWidget()
         self.tci_tab = QWidget()
         self.cat_tab = QWidget()
         self.io_tab = QWidget()
@@ -66,7 +104,6 @@ class Menu (QWidget):
         self.country_list_edit = QWidget()
     #
         self.tab.addTab(self.general_tab, "General")
-        self.tab.addTab(self.cluster_tab, "Cluster")
         self.tab.addTab(self.tci_tab, "TCI/ RIG control")
         self.tab.addTab(self.cat_tab, "CAT")
         self.tab.addTab(self.io_tab, "Log file")
@@ -94,6 +131,25 @@ class Menu (QWidget):
         self.clear_base_button = QPushButton("Clear base (DELETE all QSO)")
         self.clear_base_button.clicked.connect(self.clear_base_qso)
         self.dlg = QColorDialog(self)
+        self.theme_label = QLabel("Theme")
+        self.theme_label.setStyleSheet(self.label_style)
+        self.themes_path = Path(__file__).parent / "themes.json"
+        self.custom_themes = {}
+        try:
+            if self.themes_path.exists():
+                with self.themes_path.open("r", encoding="utf-8") as theme_file:
+                    loaded = json.load(theme_file)
+                if isinstance(loaded, dict):
+                    self.custom_themes = loaded
+        except Exception:
+            self.custom_themes = {}
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(THEMES.keys()) + sorted(self.custom_themes.keys()))
+        current_theme = self.settingsDict.get("theme", "Dark")
+        if current_theme not in THEMES:
+            current_theme = "Dark"
+        self.theme_combo.setCurrentText(current_theme)
+        self.theme_combo.currentTextChanged.connect(self.apply_theme)
         self.back_color_label = QLabel("Window color")
         self.back_color_label.setStyleSheet(self.label_style)
         self.back_color_input = QPushButton()
@@ -178,6 +234,22 @@ class Menu (QWidget):
         self.db_host.setStyleSheet(formstyle)
         ########
 
+        self.qth_locator_label = QLabel("My QTH locator:")
+        self.qth_locator_label.setFixedWidth(100)
+        self.qth_locator_input = QLineEdit()
+        self.qth_locator_input.setFixedWidth(100)
+        self.qth_locator_input.setMaxLength(8)
+        self.qth_locator_input.setPlaceholderText("e.g. KO50AA")
+        self.qth_locator_input.setStyleSheet(formstyle)
+        self.qth_locator_input.setToolTip(
+            "Your Maidenhead grid locator (2, 4, 6 or 8 characters)"
+        )
+
+        self.qth_locator_lay = QHBoxLayout()
+        self.qth_locator_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qth_locator_lay.addWidget(self.qth_locator_label)
+        self.qth_locator_lay.addWidget(self.qth_locator_input)
+
         # setup all elements to vertical lay
         self.call_lay = QHBoxLayout()
         self.call_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -186,6 +258,7 @@ class Menu (QWidget):
         self.call_lay.addWidget(self.swl_chekbox)
         self.call_lay.addWidget(self.clear_base_button)
         self.general_tab.layout.addLayout(self.call_lay)
+        self.general_tab.layout.addLayout(self.qth_locator_lay)
 
 
         self.general_tab.layout.addSpacing(20)
@@ -195,6 +268,19 @@ class Menu (QWidget):
         self.horizontal_lay = QHBoxLayout()
         self.color_lay = QVBoxLayout()
         self.color_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.color_lay.addWidget(self.theme_label)
+        self.color_lay.addWidget(self.theme_combo)
+        self.theme_buttons_lay = QHBoxLayout()
+        self.save_theme_button = QPushButton("Save theme")
+        self.save_theme_button.clicked.connect(self.save_custom_theme)
+        self.export_theme_button = QPushButton("Export")
+        self.export_theme_button.clicked.connect(self.export_custom_theme)
+        self.import_theme_button = QPushButton("Import")
+        self.import_theme_button.clicked.connect(self.import_custom_theme)
+        self.theme_buttons_lay.addWidget(self.save_theme_button)
+        self.theme_buttons_lay.addWidget(self.export_theme_button)
+        self.theme_buttons_lay.addWidget(self.import_theme_button)
+        self.color_lay.addLayout(self.theme_buttons_lay)
         self.color_lay.addWidget(self.window_border)
         self.color_lay.addWidget(self.back_color_label)
         self.color_lay.addWidget(self.back_color_input)
@@ -256,167 +342,6 @@ class Menu (QWidget):
         #self.general_tab.layout.addWidget(self.text_form_color_button)
 
         self.general_tab.setLayout(self.general_tab.layout)
-
-    # create Cluster tab
-
-        self.cluster_tab.layout = QVBoxLayout(self)
-        self.cluster_host = QLabel("Cluster host:")
-        self.cluster_host_input = QLineEdit()
-        self.cluster_host_input.setFixedWidth(150)
-        self.cluster_host_input.setStyleSheet(formstyle)
-        self.cluster_port = QLabel("Cluster port:")
-        self.cluster_port_input = QLineEdit()
-        self.cluster_port_input.setFixedWidth(50)
-        self.cluster_port_input.setStyleSheet(formstyle)
-
-        # create host:port lay
-        self.host_port_lay = QHBoxLayout()
-        self.host_lay = QVBoxLayout()
-        self.host_lay.addWidget(self.cluster_host)
-        self.host_lay.addWidget(self.cluster_host_input)
-
-        self.port_lay = QVBoxLayout()
-        self.port_lay.addWidget(self.cluster_port)
-        self.port_lay.addWidget(self.cluster_port_input)
-
-        self.host_port_lay.addLayout(self.host_lay)
-        self.host_port_lay.addLayout(self.port_lay)
-
-
-        # Create calibrate cluster
-        self.calibrate_lay = QHBoxLayout()
-        ## Create text label
-        self.text_and_button_Vlay = QVBoxLayout()
-        text = "Press \"Start claibrate\" and select Callsign and Freq \n" \
-               "from the received line from the telnet cluster"
-        self.message_label = QLabel(text)
-        self.message_label.setStyleSheet("font: 12px;")
-        self. text_and_button_Vlay.addWidget(self.message_label)
-
-        self.button_and_combo = QHBoxLayout()
-        ## Create group from button and combobox
-        self.cluster_start_calibrate_button = QPushButton("Start \n callibrate")
-        self.cluster_start_calibrate_button.setFixedWidth(100)
-        self.cluster_start_calibrate_button.setFixedHeight(60)
-        self.button_and_combo.addWidget(self.cluster_start_calibrate_button)
-        self.combo_lay = QVBoxLayout()
-        self.call_H = QHBoxLayout()
-        self.call_H.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.cluster_call_label = QLabel("Call:")
-
-        self.cluster_combo_call = QComboBox()
-
-        self.freq_H = QHBoxLayout()
-        self.freq_H.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.cluster_freq_label = QLabel("Freq:")
-        self.cluster_combo_freq = QComboBox()
-        self.call_H.addWidget(self.cluster_call_label)
-        self.call_H.addWidget(self.cluster_combo_call)
-        self.freq_H.addWidget(self.cluster_freq_label)
-        self.freq_H.addWidget(self.cluster_combo_freq)
-        self.combo_lay.addLayout(self.call_H)
-        self.combo_lay.addLayout(self.freq_H)
-        self.button_and_combo.addLayout(self.combo_lay)
-        self.text_and_button_Vlay.addLayout(self.button_and_combo)
-
-        self.calibrate_lay.addLayout(self.text_and_button_Vlay)
-
-
-
-
-        ## Create filter band
-        self.cluster_filter_band_combo = QCheckBox("Filter BAND")
-        self.cluster_filter_band_combo.setStyleSheet("QWidget{ color:" + self.settingsDict['color'] + "; font-size: 12px;}")
-        self.cluster_filter_band_input = QLineEdit()
-        self.cluster_filter_band_input.setFixedWidth(80)
-        self.cluster_filter_band_input.setFixedHeight(20)
-        self.cluster_filter_band_input.setStyleSheet("background-color:"+self.settingsDict['form-background']+"; font-size: 12px")
-        text = "Bands in m."
-        self.message_label_band = QLabel(text)
-        self.message_label_band.setStyleSheet("font: 12px;")
-
-        self.filter_band_lay = QVBoxLayout()
-        self.filter_band_lay.addWidget(self.cluster_filter_band_combo)
-        self.filter_band_lay.addWidget(self.message_label_band)
-        self.filter_band_lay.addWidget(self.cluster_filter_band_input)
-
-
-
-        ## Create filter spot
-        self.cluster_filter_spot_combo = QCheckBox("Filter SPOT")
-        self.cluster_filter_spot_combo.setStyleSheet(
-            "QWidget {color:" + self.settingsDict['color'] + "; font-size: 12px;}")
-        self.cluster_filter_spot_input = QLineEdit()
-        self.cluster_filter_spot_input.setFixedWidth(80)
-        self.cluster_filter_spot_input.setFixedHeight(20)
-        self.cluster_filter_spot_input.setStyleSheet(
-            "background-color:" + self.settingsDict['form-background'] + "; font-size: 12px")
-        text = "Spot prefixes"
-        self.message_label_spot = QLabel(text)
-        self.message_label_spot.setStyleSheet("font: 12px;")
-
-        self.filter_spot_lay = QVBoxLayout()
-        self.filter_spot_lay.addWidget(self.cluster_filter_spot_combo)
-        self.filter_spot_lay.addWidget(self.message_label_spot)
-        self.filter_spot_lay.addWidget(self.cluster_filter_spot_input)
-
-        ## create filter spotter
-        self.cluster_filter_spotter_combo = QCheckBox("Filter SPOTTER")
-        self.cluster_filter_spotter_combo.setStyleSheet(
-            "QWidget {color:" + self.settingsDict['color'] + "; font-size: 12px;}")
-        self.cluster_filter_spotter_input = QLineEdit()
-        self.cluster_filter_spotter_input.setFixedWidth(80)
-        self.cluster_filter_spotter_input.setFixedHeight(20)
-        self.cluster_filter_spotter_input.setStyleSheet(
-            "background-color:" + self.settingsDict['form-background'] + "; font-size: 12px")
-        text = "Spotter prefixes"
-        self.message_label_spotter = QLabel(text)
-        self.message_label_spotter.setStyleSheet("font: 12px;")
-
-        self.filter_spotter_lay = QVBoxLayout()
-        self.filter_spotter_lay.addWidget(self.cluster_filter_spotter_combo)
-        self.filter_spotter_lay.addWidget(self.message_label_spotter)
-        self.filter_spotter_lay.addWidget(self.cluster_filter_spotter_input)
-
-        text = "All value separate by comma"
-        self.filter_message_label = QLabel(text)
-        self.filter_message_label.setStyleSheet("font: 12px;")
-
-        self.filters_Hlay = QHBoxLayout()
-        self.filters_Hlay.addLayout(self.filter_band_lay)
-        self.filters_Hlay.addLayout(self.filter_spot_lay)
-        self.filters_Hlay.addLayout(self.filter_spotter_lay)
-
-        self.filters_lay = QVBoxLayout()
-        self.filters_lay.addSpacing(10)
-        self.filters_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.filters_lay.addLayout(self.filters_Hlay)
-        self.filters_lay.addWidget(self.filter_message_label)
-        self.filters_lay.addSpacing(10)
-        Separador = QFrame()
-        Separador.setFrameShape(QFrame.Shape.HLine)
-        Separador.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        Separador.setLineWidth(1)
-        self.filters_lay.addWidget(Separador)
-
-
-        ## Create List view for input string from cluster
-
-        self.line_text = QLabel()
-
-        self.line_text.setFixedHeight(50)
-        # Set all layers to window
-        self.cluster_tab.layout.addLayout(self.host_port_lay)
-        self.cluster_tab.layout.addSpacing(10)
-        self.cluster_tab.layout.addLayout(self.filters_lay)
-        self.cluster_tab.layout.addLayout(self.calibrate_lay)
-        self.cluster_tab.layout.addWidget(self.line_text)
-
-        ## install lay to main tab (Cluster)
-        self.cluster_tab.setLayout(self.cluster_tab.layout)
-
-
-    # create TCI Tab
 
         self.tci_enable_combo_lay = QHBoxLayout()
         self.tci_enable_combo_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -512,7 +437,7 @@ class Menu (QWidget):
 
         self.tci_tab.layout.addLayout(self.tci_enable_combo_lay)
         self.tci_tab.layout.addLayout(self.host_port_lay)
-        self.tci_tab.layout.addWidget(Separador)
+        #self.tci_tab.layout.addWidget(Separador)
         self.tci_tab.layout.addLayout(self.rigctl_enable_combo_lay)
         self.tci_tab.layout.addLayout(self.rigctl_host_port)
         self.tci_tab.layout.addSpacing(250)
@@ -895,12 +820,12 @@ class Menu (QWidget):
         if confirm_dialog == QMessageBox.StandardButton.Yes:
             delete_result = self.db_sql.delete_all_qso()
             self.logWindow.refresh_data()
-            print(f"Delete {delete_result}")
+            logger.debug(f"Delete {delete_result}")
 
 
     def context_country(self, point):
         context_country = QMenu()
-        #print(self.country_table.currentRow())
+        #logger.debug(self.country_table.currentRow())
         index_row = self.country_table.currentRow()
         #if self.country_table.itemAt(point):
         delete_country = QAction("Delete country", context_country)
@@ -909,7 +834,7 @@ class Menu (QWidget):
         context_country.exec_(self.country_table.mapToGlobal(point))
 
     def country_del(self, index_row):
-        #print("delete country", index_row)
+        #logger.debug("delete country", index_row)
         self.country_table.removeRow(index_row)
 
     def add_country_row(self):
@@ -952,24 +877,15 @@ class Menu (QWidget):
     def initData (self):
         #init data in general tab
         self.call_input.setText(self.settingsDict["my-call"])
+        self.qth_locator_input.setText(
+            self.settingsDict.get("my-qth-locator", "")
+        )
         if self.settingsDict['border_wnd'] == "enable":
             self.window_border.setChecked(True)
         #self.text_color_input.setText(self.settingsDict['color'])
         #self.form_color_input.setText(self.settingsDict['form-background'])
         #self.back_color_input.setText(self.settingsDict['background-color'])
-        #init data in cluster tab
-        self.cluster_host_input.setText(self.settingsDict['telnet-host'])
-        self.cluster_port_input.setText(self.settingsDict['telnet-port'])
-        if self.settingsDict['filter_by_band'] == 'enable':
-            self.cluster_filter_band_combo.setChecked(True)
-        self.cluster_filter_band_input.setText(self.settingsDict['list-by-band'])
-        if self.settingsDict['filter-by-prefix'] == 'enable':
-            self.cluster_filter_spot_combo.setChecked(True)
-        self.cluster_filter_spot_input.setText(self.settingsDict['filter-prefix'])
-        if self.settingsDict['filter-by-prefix-spotter'] == 'enable':
-            self.cluster_filter_spotter_combo.setChecked(True)
-        self.cluster_filter_spotter_input.setText(self.settingsDict['filter-prefix-spotter'])
-        self.cluster_start_calibrate_button.clicked.connect(self.start_calibrate_cluster)
+        # Cluster settings are now edited directly in the cluster window.
 
         self.db_login.setText(self.settingsDict['db-user'])
         self.db_pass.setText(self.settingsDict['db-pass'])
@@ -1040,16 +956,19 @@ class Menu (QWidget):
         self.fill_country()
 
     def closeEvent(self, e):
-        #print("Close menu", e)
-        self.close()
+        calibration_thread = getattr(self, "cluster", None)
+        if calibration_thread is not None and calibration_thread.isRunning():
+            calibration_thread.stop()
+            calibration_thread.wait(4000)
+        e.accept()
 
     def search_country(self):
         country = self.country_found.text().strip().lower()
         pfx = self.pfx_found.text().strip().lower()
-        print(pfx)
+        logger.debug(pfx)
 
         for i in range(self.country_table.rowCount()):
-            #print(country, self.country_table.item(i, 0).text())
+            #logger.debug(country, self.country_table.item(i, 0).text())
             if self.country_table.item(i,0).text().lower() == country:
                 self.country_table.scrollToItem(self.country_table.item(i,0))
                 self.country_table.item(i, 0).setBackground(
@@ -1078,43 +997,52 @@ class Menu (QWidget):
                 double_qso = []
                 bad_qso = []
                 allRecords = parse.getAllRecord(self.allCollumn, fname, key="import")
-                print(f"All records {allRecords}")
                 self.logWindow.load_bar.show()
                 all_records_count = len(allRecords)
+                db_importer = QsoRepository(self.settingsDict)
                 for i, qso_in_file in enumerate(allRecords):
-                    if len(qso_in_file["TIME_ON"].strip()) < 6:
-                        while len(qso_in_file["TIME_ON"]) < 6:
-                            qso_in_file["TIME_ON"] += "0"
-                    if len(qso_in_file["TIME_ON"].strip()) > 6:
-                        qso_in_file["TIME_ON"] = qso_in_file["TIME_ON"][:6]
-                    if len(qso_in_file["QSO_DATE"].strip()) != 8 or len(qso_in_file["TIME_ON"].strip()) != 6:
+                    qso_date = parse.normalize_adi_date(qso_in_file.get("QSO_DATE"))
+                    time_on = parse.normalize_adi_time(qso_in_file.get("TIME_ON"))
+                    time_off = parse.normalize_adi_time(qso_in_file.get("TIME_OFF"))
+                    if not qso_date or not time_on:
                         bad_qso.append(qso_in_file)
                         continue
-                    double_counter = len(double_qso)
-                    search_qso_in_base = main.Db(self.settingsDict).search_qso_by_full_data(
-                        str(qso_in_file["CALL"]),
-                        str(qso_in_file["QSO_DATE"]),
-                        str(qso_in_file["TIME_ON"]),
-                        str(qso_in_file["BAND"]),
-                        str(qso_in_file["MODE"])
+                    qso_in_file["QSO_DATE"] = qso_date
+                    qso_in_file["TIME_ON"] = time_on
+                    qso_in_file["TIME_OFF"] = time_off or time_on
+                    search_qso_in_base = db_importer.search_qso_by_full_data(
+                        str(qso_in_file.get("CALL") or ""),
+                        qso_date,
+                        time_on,
+                        str(qso_in_file.get("BAND") or ""),
+                        str(qso_in_file.get("MODE") or ""),
                     )
                     if search_qso_in_base:
                         double_qso.append(qso_in_file)
-                    if len(double_qso) > double_counter:
+                        continue
+                    try:
+                        db_importer.record_qso_to_base(qso_in_file, mode="import")
+                    except Exception:
+                        # Keep importing the rest of the file; save this
+                        # record for later inspection.
+                        bad_qso.append(qso_in_file)
                         continue
                     good_qso_count += 1
-                    main.Db(self.settingsDict).record_qso_to_base(qso_in_file, mode="import")
-                    self.logWindow.load_bar.setValue(int(i * 100 / all_records_count))
+                    if all_records_count:
+                        self.logWindow.load_bar.setValue(
+                            int(i * 100 / all_records_count)
+                        )
                 if double_qso is not None:
                     main.Adi_file(self.settingsDict["APP_VERSION"],
                                   self.settingsDict).record_dict_qso(double_qso, self.allCollumn, name_file="double_adi.adi")
                 if bad_qso is not None:
                     main.Adi_file(self.settingsDict["APP_VERSION"],
                                   self.settingsDict).record_dict_qso(bad_qso, self.allCollumn, name_file="bad_adi.adi")
+                self.logWindow.load_bar.setValue(100)
                 self.logWindow.refresh_data()
                 message = f"Added QSO: {good_qso_count} \n"
-                message += f"Bad QSO: {len(bad_qso)} Incorect QSO_DATE or TIME_ON \n The bad records save in /home/linlog/bad_adi.adi" if bad_qso != [] else ""
-                message += f"\nDouble QSO: {len(double_qso)} \n The double records save in /home/linlog/double_adi.adi" if double_qso != [] else ""
+                message += f"Bad QSO: {len(bad_qso)} Incorrect QSO_DATE/TIME_ON or database error \n The bad records are saved in bad_adi.adi" if bad_qso != [] else ""
+                message += f"\nDouble QSO: {len(double_qso)} \n The duplicate records are saved in double_adi.adi" if double_qso != [] else ""
                 std.std.message(self, message, "Import")
             except Exception:
                 std.std.message(self, traceback.format_exc(), "STOP!")
@@ -1123,37 +1051,80 @@ class Menu (QWidget):
         file_name, _ = QFileDialog.getSaveFileName(self, "Export adi", "",
                                                   "Adi (*.adi)")
         if file_name:
+            if not file_name.lower().endswith(".adi"):
+                file_name += ".adi"
 
-            allRecords = main.Db(self.settingsDict).get_all_records()
+            allRecords = QsoRepository(self.settingsDict).all_records()
             main.Adi_file(self.app_env.appVersion(), self.settingsDict).record_dict_qso(
                 list_data=allRecords,
                 fields_list=self.table_columns,
-                name_file=file_name+'.adi')
+                name_file=file_name)
             std.std.message(self, f"Export to\n{file_name}\n completed", "Export complited")
 
     def export_adi_clublog(self):
+        self.export_clublog_button.setEnabled(False)
+        clublog = internetworker.Clublog(settingsDict=self.settingsDict)
+        clublog.export_completed.connect(self._clublog_export_completed)
+        clublog.operation_error.connect(self._clublog_export_failed)
 
-        try:
-            clublog = internetworker.Clublog(settingsDict=self.settingsDict)
-            response = clublog.export_file("log.adi")
-            if response.status_code == 200:
-                print("response for Club log:_>", response, response.headers)
-                std.std.message(self, "Club log: "+response.content.decode(self.settingsDict['encodeStandart']), "Ok")
-            elif response.status_code == 403:
-                print("response for Club log:_>", response,  response.content)
-                std.std.message(self, "Club log: "+response.content.decode(self.settingsDict['encodeStandart'])+"\n", "ERROR")
-        except Exception:
-            std.std.message(self, "Check internet connection\n",
-                            "ERROR Club log")
+        thread = QThread(self)
+        clublog.moveToThread(thread)
+        clublog.export_requested.connect(clublog.export_file_async)
+        clublog.operation_finished.connect(thread.quit)
+        clublog.operation_finished.connect(clublog.deleteLater)
+        thread.started.connect(lambda worker=clublog: worker.export_requested.emit("log.adi"))
+        thread.finished.connect(self._enable_clublog_export)
+        thread.finished.connect(thread.deleteLater)
+        self._clublog_workers[thread] = clublog
+        thread.finished.connect(lambda thread=thread: self._clublog_workers.pop(thread, None))
+        thread.start()
+
+    @QtCore.pyqtSlot(object)
+    def _clublog_export_completed(self, response):
+        message = response.content.decode(self.settingsDict['encodeStandart'], errors='replace')
+        if response.status_code == 200:
+            std.std.message(self, "Club Log: " + message, "Export completed")
+        else:
+            std.std.message(self, "Club Log: " + message, "ERROR")
+
+    @QtCore.pyqtSlot(str)
+    def _clublog_export_failed(self, message):
+        std.std.message(self, message, "ERROR Club Log")
+
+    @QtCore.pyqtSlot()
+    def _enable_clublog_export(self):
+        self.export_clublog_button.setEnabled(True)
 
     def start_calibrate_cluster(self):
-       # print("start_calibrate_cluster:_>", self.settingsDict)
-        self.telnetCluster.stop_cluster()
-        self.cluster = cluster_in_Thread (self.cluster_host_input.text().strip(),
+       # logger.debug("start_calibrate_cluster:_>", self.settingsDict)
+       self.telnetCluster.stop_cluster()
+       if hasattr(self, "cluster") and self.cluster.isRunning():
+           self.cluster.stop()
+           if not self.cluster.wait(4000):
+               std.std.message(self, "Cluster calibration is still stopping", "Telnet")
+               return
+       self.cluster = cluster_in_Thread (self.cluster_host_input.text().strip(),
                                           self.cluster_port_input.text().strip(),
                                           self.call_input.text().strip(),
                                           settingsDict=self.settingsDict, parent_window=self)
-        self.cluster.start()
+       self.cluster.calibration_result.connect(self.apply_cluster_calibration)
+       self.cluster.start()
+
+    @QtCore.pyqtSlot(object)
+    def apply_cluster_calibration(self, clean_list):
+        self.cluster_combo_call.clear()
+        self.cluster_combo_freq.clear()
+        for index, value in enumerate(clean_list):
+            option = f"{index}:{value}"
+            self.cluster_combo_call.addItem(option)
+            self.cluster_combo_freq.addItem(option)
+
+        call_index = int(self.settingsDict.get('telnet-call-position', 0))
+        freq_index = int(self.settingsDict.get('telnet-freq-position', 0))
+        self.cluster_combo_call.setCurrentIndex(call_index)
+        self.cluster_combo_freq.setCurrentIndex(freq_index)
+        self.line_text.setText(' '.join(clean_list))
+        self.telnetCluster.start_cluster()
 
     def refresh_interface(self):
         self.update_color_schemes()
@@ -1183,6 +1154,99 @@ class Menu (QWidget):
             self.text_form_color_button.autoFillBackground()
     #self.back_color_input.clicked.connect(self.text_color_select)
 
+    def apply_theme(self, theme_name):
+        theme = THEMES.get(theme_name) or self.custom_themes.get(theme_name)
+        if not theme:
+            return
+        for key, value in theme.items():
+            self.settingsDict[key] = value
+        self.settingsDict["theme"] = theme_name
+        self.back_color_input.setStyleSheet("background:" + theme["background-color"] + "; color:" + theme["background-color"] + ";")
+        self.back_color_input.setText(theme["background-color"])
+        self.text_color_input.setStyleSheet("background:" + theme["color"] + "; color:" + theme["color"] + ";")
+        self.text_color_input.setText(theme["color"])
+        self.form_color_input.setStyleSheet("background: " + theme["form-background"] + "; color:" + theme["form-background"] + ";")
+        self.form_color_input.setText(theme["form-background"])
+        self.text_form_color_button.setStyleSheet("background: " + theme["color-table"] + "; color: " + theme["color-table"] + ";")
+        self.text_form_color_button.setText(theme["color-table"])
+        style = "QWidget{background-color:" + theme['background-color'] + "; color:" + theme['color'] + ";}"
+        self.setStyleSheet(style)
+
+    def _current_theme_colors(self):
+        return {
+            "background-color": self.back_color_input.text().strip(),
+            "color": self.text_color_input.text().strip(),
+            "form-background": self.form_color_input.text().strip(),
+            "color-table": self.text_form_color_button.text().strip(),
+            "solid-color": self.settingsDict.get("solid-color", "#2b4a66"),
+        }
+
+    def save_custom_theme(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save theme", "Theme name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in THEMES:
+            QMessageBox.warning(self, "Save theme", "This name is reserved for a built-in theme.")
+            return
+        self.custom_themes[name] = self._current_theme_colors()
+        try:
+            with self.themes_path.open("w", encoding="utf-8") as theme_file:
+                json.dump(self.custom_themes, theme_file, ensure_ascii=False, indent=2)
+        except Exception as error:
+            QMessageBox.warning(self, "Save theme", str(error))
+            return
+        if self.theme_combo.findText(name) < 0:
+            self.theme_combo.addItem(name)
+        self.theme_combo.setCurrentText(name)
+
+    def export_custom_theme(self):
+        name = self.theme_combo.currentText()
+        theme = THEMES.get(name) or self.custom_themes.get(name)
+        if not theme:
+            return
+        file_name, _ = QFileDialog.getSaveFileName(self, "Export theme", name + ".json", "JSON (*.json)")
+        if not file_name:
+            return
+        try:
+            with open(file_name, "w", encoding="utf-8") as theme_file:
+                json.dump({name: theme}, theme_file, ensure_ascii=False, indent=2)
+        except Exception as error:
+            QMessageBox.warning(self, "Export theme", str(error))
+
+    def import_custom_theme(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Import theme", "", "JSON (*.json)")
+        if not file_name:
+            return
+        try:
+            with open(file_name, "r", encoding="utf-8") as theme_file:
+                loaded = json.load(theme_file)
+        except Exception as error:
+            QMessageBox.warning(self, "Import theme", str(error))
+            return
+        if not isinstance(loaded, dict):
+            QMessageBox.warning(self, "Import theme", "Invalid theme file.")
+            return
+        # Accept either {"Name": {...}} or a bare color dictionary.
+        if all(isinstance(value, str) for value in loaded.values()):
+            loaded = {"Imported theme": loaded}
+        for name, theme in loaded.items():
+            if not isinstance(theme, dict):
+                continue
+            if name in THEMES:
+                name = name + " (imported)"
+            self.custom_themes[name] = theme
+        try:
+            with self.themes_path.open("w", encoding="utf-8") as theme_file:
+                json.dump(self.custom_themes, theme_file, ensure_ascii=False, indent=2)
+        except Exception as error:
+            QMessageBox.warning(self, "Import theme", str(error))
+            return
+        self.theme_combo.clear()
+        self.theme_combo.addItems(list(THEMES.keys()) + sorted(self.custom_themes.keys()))
+        if loaded:
+            self.theme_combo.setCurrentText(next(iter(loaded.keys())))
+
     def back_color_select(self):
         #self.dlg.show()
         color = QColorDialog.getColor(initial=QColor(self.back_color_input.text()), parent=None, title="Select color for background color")
@@ -1206,19 +1270,14 @@ class Menu (QWidget):
         # SAve general tab
         call = self.settingsDict['my-call']
         self.settingsDict['my-call'] = self.call_input.text()
+        self.settingsDict['my-qth-locator'] = normalize_locator(
+            self.qth_locator_input.text()
+        )
         self.settingsDict['background-color'] = self.back_color_input.text()
         self.settingsDict['color'] = self.text_color_input.text()
         self.settingsDict['form-background'] = self.form_color_input.text()
         self.settingsDict['color-table'] = self.text_form_color_button.text()
-        self.settingsDict['telnet-host'] = self.cluster_host_input.text().strip()
-        self.settingsDict['telnet-port'] = self.cluster_port_input.text().strip()
-        self.settingsDict['list-by-band'] = self.cluster_filter_band_input.text()
-        self.settingsDict['filter-prefix'] = self.cluster_filter_spot_input.text()
-        self.settingsDict['filter-prefix-spotter'] = self.cluster_filter_spotter_input.text()
-        if self.cluster_combo_call.currentText() != '':
-            self.settingsDict['telnet-call-position'] = self.cluster_combo_call.currentText().split(":")[0]
-        if self.cluster_combo_freq.currentText() != '':
-            self.settingsDict['telnet-freq-position'] = self.cluster_combo_freq.currentText().split(":")[0]
+        self.settingsDict['theme'] = self.theme_combo.currentText()
         self.settingsDict['db-user'] = self.db_login.text().strip()
         self.settingsDict['db-pass'] = self.db_pass.text().strip()
         self.settingsDict['db-name'] = self.db_name.text().strip()
@@ -1298,34 +1357,7 @@ class Menu (QWidget):
 
         # Save cluster
         cluster_change_flag = 0
-        if self.cluster_filter_band_combo.isChecked():
-            if self.settingsDict['filter_by_band'] != "enable":
-                self.settingsDict['filter_by_band'] = "enable"
-                cluster_change_flag = 1
-        else:
-            if self.settingsDict['filter_by_band'] != "disable":
-                self.settingsDict['filter_by_band'] = "disable"
-                cluster_change_flag = 1
-
-        if self.cluster_filter_spot_combo.isChecked():
-            if self.settingsDict['filter-by-prefix'] != "enable":
-                self.settingsDict['filter-by-prefix'] = "enable"
-                cluster_change_flag = 1
-        else:
-            if self.settingsDict['filter-by-prefix'] != "disable":
-                self.settingsDict['filter-by-prefix'] = "disable"
-                cluster_change_flag = 1
-
-        if self.cluster_filter_spotter_combo.isChecked():
-            if self.settingsDict['filter-by-prefix-spotter'] != "enable":
-                self.settingsDict['filter-by-prefix-spotter'] = "enable"
-                cluster_change_flag = 1
-        else:
-            if self.settingsDict['filter-by-prefix-spotter'] != "disable":
-                self.settingsDict['filter-by-prefix-spotter'] = "disable"
-                cluster_change_flag = 1
-
-
+        # Cluster spot filtering is now configured in the cluster window.
         return cluster_change_flag
 
     def update_country_list(self):
@@ -1346,8 +1378,8 @@ class Menu (QWidget):
                     cq_zone = self.country_table.item(i, 3).text()
                     data_object.update({country: {'prefix': pfx_list_clean,'itu': itu,'cq-zone': cq_zone }})
             except Exception:
-                print("Exception in update country list str: 1149")
-            #print(data_object)
+                logger.debug("Exception in update country list str: 1149")
+            #logger.debug(data_object)
 
         with open(Path(__file__).parent/self.settingsDict['country-file'], 'w') as f:
             json.dump(data_object, f)
@@ -1370,6 +1402,7 @@ class Menu (QWidget):
             self.logForm.rigctl_stop()
 
         self.logForm.refresh_interface()
+        self.logForm.refresh_qth_map_locator()
         self.logSearch.refresh_interface()
         self.logWindow.refresh_interface()
         self.internetSearch.refresh_interface()
@@ -1383,26 +1416,32 @@ class Menu (QWidget):
 
         cluster_change_flag = self.store_new_settingsDict()
         self.logForm.refresh_interface()
-        filename = 'settings.cfg'
-        with open(Path(__file__).parent/filename, 'r') as f:
-            old_data = f.readlines()
-        for index, line in enumerate(old_data):
-            key_from_line = line.split('=')[0]
-            #print ("key_from_line:",key_from_line)
-            for key in self.settingsDict:
-
-                if key_from_line == key:
-                    #print("key",key , "line", line)
-                    old_data[index] = key+"="+self.settingsDict[key]+"\n"
-        with open(Path(__file__).parent/filename, 'w') as f:
-            f.writelines(old_data)
-        #print ("Save_and_Exit_button: ", old_data)
+        self.logForm.refresh_qth_map_locator()
+        config_store.update_settings(self.settingsDict)
+        config_store.ensure_settings({
+            'my-qth-locator': self.settingsDict.get('my-qth-locator', ''),
+            'qth-map-window': self.settingsDict.get('qth-map-window', 'False'),
+            'qth-map-window-left': self.settingsDict.get('qth-map-window-left', '100'),
+            'qth-map-window-top': self.settingsDict.get('qth-map-window-top', '100'),
+            'qth-map-window-width': self.settingsDict.get('qth-map-window-width', '900'),
+            'qth-map-window-height': self.settingsDict.get('qth-map-window-height', '520'),
+            'cluster-connection-enabled': self.settingsDict.get('cluster-connection-enabled', 'enable'),
+            'cluster-filter-enabled': self.settingsDict.get('cluster-filter-enabled', 'disable'),
+            'cluster-filter-call': self.settingsDict.get('cluster-filter-call', ''),
+            'cluster-filter-band': self.settingsDict.get('cluster-filter-band', ''),
+            'cluster-filter-mode': self.settingsDict.get('cluster-filter-mode', ''),
+            'cluster-filter-presence': self.settingsDict.get('cluster-filter-presence', 'all'),
+            'theme': self.settingsDict.get('theme', 'Dark'),
+            'cluster-beep-enabled': self.settingsDict.get('cluster-beep-enabled', 'enable'),
+        })
         self.close()
 
     def cancel_button(self):
         self.close()
 
 class cluster_in_Thread(QThread):
+    calibration_result = QtCore.pyqtSignal(object)
+
     def __init__(self, host, port, call, parent_window, settingsDict, parent=None):
         super().__init__()
         self.settingsDict = settingsDict
@@ -1410,62 +1449,59 @@ class cluster_in_Thread(QThread):
         self.port = port
         self.call =call
         self.parent_window = parent_window
-        # self.run()
+        self._stop_requested = False
+        self._socket = None
+
+    def stop(self):
+        self._stop_requested = True
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
 
     def run(self):
-
-        while 1:
+        while not self._stop_requested:
             try:
-                telnetObj = telnetlib.Telnet(self.host, self.port)
+                self._socket = socket.create_connection((self.host, int(self.port)), timeout=3)
                 break
-            except:
-                time.sleep(3)
-                continue
+            except (OSError, ValueError, TypeError):
+                for _ in range(30):
+                    if self._stop_requested:
+                        return
+                    self.msleep(100)
 
-        lastRow = 0
-        message = (self.call + "\n").encode('ascii')
-        telnetObj.write(message)
-        message2 = (self.call + "\n").encode('ascii')
-        telnetObj.write(message2)
-        splitString = []
-        cleanList = []
-        output_data = ""
-        i = 0
-        #print('Starting Telnet cluster:', self.host, ':', self.port, '\nCall:', self.call, '\n\n')
-        while 1:
-            try:
-                output_data = telnetObj.read_some()
-            except:
-                continue
+        if self._stop_requested or self._socket is None:
+            return
 
-            if output_data != '':
+        try:
+            self._socket.settimeout(1)
+            login_message = (self.call + "\n").encode('ascii')
+            self._socket.sendall(login_message)
+            self._socket.sendall(login_message)
+            buffer = ""
+            while not self._stop_requested:
+                try:
+                    received = self._socket.recv(4096)
+                except socket.timeout:
+                    continue
+                if not received:
+                    break
 
-                    if output_data[0:2].decode(self.settingsDict['encodeStandart']) == "DX":
-                        splitString = output_data.decode(self.settingsDict['encodeStandart']).split(' ')
-                        count_chars = len(splitString)
-                        for i in range(count_chars):
-                            if splitString[i] != '':
-                                cleanList.append(splitString[i])
-                        break
-            time.sleep(0.3)
-        ##########
-
-        i = 0
-        for value in cleanList:
-            self.parent_window.cluster_combo_call.addItems([str(i) + ":" + value])
-            self.parent_window.cluster_combo_freq.addItems([str(i) + ":" + value])
-            i += 1
-
-        self.parent_window.cluster_combo_call.setCurrentIndex(int(self.settingsDict['telnet-call-position']))
-        self.parent_window.cluster_combo_freq.setCurrentIndex(int(self.settingsDict['telnet-freq-position']))
-        self.parent_window.line_text.setText(' '.join(cleanList))
-        self.parent_window.telnetCluster.start_cluster()
-
-        self.currentThread().exit()
-        self.currentThread().wait()
-
-
-
-
-
-
+                buffer += received.decode(self.settingsDict['encodeStandart'], errors="ignore")
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    spot = line.replace("\x07", "").strip()
+                    upper_spot = spot.upper()
+                    if upper_spot.startswith("DX") and "Z" in upper_spot:
+                        clean_list = spot.split()
+                        if clean_list:
+                            self.calibration_result.emit(clean_list)
+                            return
+        except (OSError, UnicodeError):
+            return
+        finally:
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None

@@ -1,0 +1,9 @@
+ADIF from LinLog Light v.2.5.1 
+Copyright 2019-2026  Baston V. Sergey
+Header generated on 21/10/26 07:36:07 by UR4LGA
+File output restricted to QSOs by : All Operators - All Bands - All Modes 
+<PROGRAMID:6>LinLog
+<PROGRAMVERSION:5>2.5.1
+<EOH>
+
+<BAND:3>40M <CALL:6>UA9SBQ <FREQ:1>7 <MODE:3>SSB <OPERATOR:6>UR4LGA <QSO_DATE:8>20160703 <TIME_ON:4>1812 <RST_RCVD:0> <RST_SENT:2>59 <NAME:0> <QTH:0> <COMMENTS:0> <TIME_OFF:0> <EQSL_QSL_RCVD:1>Y <EQSL_QSL_SENT:0> <CLUBLOG_QSO_UPLOAD_STATUS:0> <EOR>
