@@ -45,4 +45,3 @@
     <li>Create a .desktop file for the applications menu and copy it to ~/.local/share/applications/</li>
     <li>To connect to the database, enter the appropriate values ​​for your DB server in the settings.cfg file for the db-host, db-user, db-pass, db-name fields.</li>
 </ol>
-

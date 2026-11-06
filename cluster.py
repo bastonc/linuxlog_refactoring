@@ -1,136 +1,78 @@
 import re
 import socket
-from threading import Lock
+from time import sleep
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, pyqtSlot
 
-
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-SPOT_TIME_RE = re.compile(r"\b\d{4}Z\b", re.IGNORECASE)
-
-
-def _clean_cluster_line(raw_line):
-    """Remove ANSI/control characters and surrounding whitespace."""
-    line = ANSI_ESCAPE_RE.sub("", raw_line)
-    line = CONTROL_CHAR_RE.sub("", line)
-    return line.strip()
-
-
-def _is_spot_line(line):
-    """Return True for DX spot lines, including ones with a trailing comment."""
-    upper = line.upper()
-    if not upper.startswith("DX"):
-        return False
-    return upper.startswith("DX DE ") or bool(SPOT_TIME_RE.search(upper))
+from threads_lib import Set_connect_thread
 
 
 class ClusterThread(QThread):
     reciev_spot_signal = pyqtSignal(object)
     reciev_string_signal = pyqtSignal(object)
-    connected_signal = pyqtSignal()
-    disconnected_signal = pyqtSignal()
-    bell_bell_signal = pyqtSignal(object)
 
     def __init__(self, settings_dict, parent=None):
-        super().__init__(parent)
+        super().__init__()
         self.settings_dict = settings_dict
-        self.host = settings_dict['telnet-host']
-        self.port = settings_dict['telnet-port']
-        self.call = settings_dict['my-call']
+        self.HOST = self.settings_dict['telnet-host']
+        self.PORT = self.settings_dict['telnet-port']
+        self.parent = parent
         self.telnet_socket = None
         self.cluster_connect_flag = False
-        self._stop_requested = False
-        self._socket_lock = Lock()
+        self.connecting_telnet()
+        self.reciev_string = ""
 
-    def _set_socket(self, connection):
-        with self._socket_lock:
-            self.telnet_socket = connection
+    def connecting_telnet(self):
+        self.connect_telnet = Set_connect_thread(self.HOST, int(self.PORT))
+        self.connect_telnet.connect_socket_signal.connect(self.connect_ok)
+        self.connect_telnet.error_connect_thread_signal.connect(self.connect_error)
+        self.connect_telnet.start()
+
+    @pyqtSlot(object)
+    def connect_ok(self, connect_object: socket.socket):
+        message = (self.settings_dict['my-call'] + "\n").encode('ascii')
+        self.telnet_socket = connect_object
+        while 1:
+            in_message = self.telnet_socket.recv(1024)
+            self.reciev_spot_signal.emit(in_message)
+            if in_message.decode(self.settings_dict['encodeStandart']).lower().strip().find("login:") or \
+                in_message.decode(self.settings_dict['encodeStandart']).lower().strip().find("please enter your call:"):
+                    self.telnet_socket.send(message)
+                    self.parent.set_telnet_stat()
+                    break
+            sleep(0.1)
+        self.start()
+        print('>Starting Telnet cluster:', self.HOST, ':', self.PORT, '\nCall:', self.settings_dict['my-call'], '\n')
+
+    @pyqtSlot(object)
+    def connect_error(self, inbox_message):
+        self.parent.set_telnet_wrong(text="Telnet --")
 
     def send_to_telnet(self, message):
-        with self._socket_lock:
-            connection = self.telnet_socket
-            if connection is None:
-                raise ConnectionError("Telnet is not connected")
-            connection.sendall((str(message) + "\n").encode("ascii"))
+        self.telnet_socket.send(bytes(message + "\n", "ascii"))
 
     def get_cluster_connect_status(self):
         return self.cluster_connect_flag
 
-    def start(self):
-        self._stop_requested = False
-        super().start()
-
-    def stop(self):
-        self._stop_requested = True
-        with self._socket_lock:
-            connection = self.telnet_socket
-            self.telnet_socket = None
-        if connection is not None:
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                connection.close()
-            except OSError:
-                pass
-
-    def _read_connection(self, connection):
-        buffer = ""
-        self.cluster_connect_flag = False
-        connection.settimeout(1)
-
-        # Send the callsign right away.  Some clusters prompt for it, others
-        # accept it as the first command; both variants work this way.
-        connection.sendall((self.call + "\n").encode("ascii", errors="ignore"))
-        self.cluster_connect_flag = True
-        self.connected_signal.emit()
-
-        while not self._stop_requested:
-            try:
-                received = connection.recv(4096)
-            except socket.timeout:
-                continue
-            if not received:
-                raise ConnectionError("Telnet server closed the connection")
-
-            buffer += received.decode(self.settings_dict['encodeStandart'], errors="ignore")
-            lines = buffer.split("\n")
-            buffer = lines.pop()
-            for raw_line in lines:
-                # A trailing BEL is used by some clusters to mark a needed
-                # spot; keep the line itself free of control characters.
-                beep = "\x07" in raw_line
-                line = _clean_cluster_line(raw_line)
-                if not line:
-                    continue
-                if _is_spot_line(line):
-                    self.reciev_spot_signal.emit(line)
-                    if beep:
-                        self.bell_bell_signal.emit(line)
-                else:
-                    self.reciev_string_signal.emit(
-                        line.encode(self.settings_dict['encodeStandart'], errors="ignore")
-                    )
-
     def run(self):
-        while not self._stop_requested:
-            connection = None
+        while 1:
             try:
-                connection = socket.create_connection((self.host, int(self.port)), timeout=2)
-                self._set_socket(connection)
-                self._read_connection(connection)
-            except (OSError, ValueError, TypeError, ConnectionError):
-                if not self._stop_requested:
-                    self.disconnected_signal.emit()
-            finally:
-                self.cluster_connect_flag = False
-                if connection is not None:
-                    self._set_socket(None)
-                    try:
-                        connection.close()
-                    except OSError:
-                        pass
-            if not self._stop_requested:
-                self.msleep(2000)
+                read_string_telnet = self.telnet_socket.recv(1024)
+                if bytes.decode(read_string_telnet, self.settings_dict['encodeStandart'], errors="ignore") not in ('', None):
+                    reciev_fragment = bytes.decode(read_string_telnet, self.settings_dict['encodeStandart'], errors="ignore").split("\r\n")
+                    reciev_fragment[0] = re.search(r'.*Z', reciev_fragment[0])
+                    if reciev_fragment[0] is not None:
+                        reciev_fragment[0] = reciev_fragment[0].group()
+                    for sub_string in reciev_fragment:
+                        if sub_string is not None and sub_string[:2] == "DX" and sub_string[-1:] == "Z":
+                            self.reciev_string = sub_string
+                            self.parent.set_telnet_stat()
+                            self.reciev_spot_signal.emit(self.reciev_string)
+                            self.reciev_string = ""
+                        else:
+                            self.reciev_string_signal.emit(read_string_telnet)                                           # if self.reciev_string[:2] == "DX" and self.reciev_string[:-1] == "Z":
+                sleep(0.2)
+            except BaseException:
+                self.parent.set_telnet_wrong(text="· Telnet")
+                self.connecting_telnet()
+                continue
