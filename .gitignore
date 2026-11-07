@@ -3,3 +3,6 @@ help_system.py-old
 __pycache__/
 settings.cfg
 readme.md
+image/*
+!image/.gitkeep
+

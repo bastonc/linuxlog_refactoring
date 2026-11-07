@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import datetime
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QPushButton, QSlider, QToolTip, QVBoxLayout, QWidget
 
 from qth_locator import (
     bearing_deg,
@@ -23,6 +24,7 @@ from world_mountains import WORLD_MOUNTAINS
 
 
 class QTHMapWidget(QWidget):
+    cluster_spot_clicked = pyqtSignal(str, str)
     """An equirectangular world map with a Maidenhead field grid."""
 
     OCEAN_COLOR = QColor(1, 11, 55)
@@ -45,7 +47,110 @@ class QTHMapWidget(QWidget):
         self.station_source = ""
         self._zoom = 1.0
         self._view = (0.0, 0.0, 360.0, 180.0)
+        self._cluster_map_enabled = False
+        self._cluster_spots = []
+        self.setMouseTracking(True)
         self.setMinimumSize(620, 330)
+
+    def set_cluster_map_enabled(self, enabled):
+        self._cluster_map_enabled = bool(enabled)
+        self.update()
+
+    def add_cluster_spot(self, call, locator, worked=False, freq=""):
+        locator = normalize_locator(locator)
+        if not locator:
+            return
+        try:
+            lat, lon = locator_to_latlon(locator)
+        except (TypeError, ValueError):
+            return
+        now = datetime.datetime.now()
+        # Replace an existing spot for the same callsign.
+        self._cluster_spots = [
+            spot for spot in self._cluster_spots if spot["call"] != call
+        ]
+        self._cluster_spots.append(
+            {
+                "call": str(call or "").strip().upper(),
+                "locator": locator,
+                "lat": lat,
+                "lon": lon,
+                "worked": bool(worked),
+                "freq": str(freq or "").strip(),
+                "time": now,
+            }
+        )
+        self._prune_cluster_spots()
+        if self._cluster_map_enabled:
+            self.update()
+
+    def _prune_cluster_spots(self):
+        cutoff = datetime.datetime.now() - datetime.timedelta(minutes=15)
+        self._cluster_spots = [
+            spot for spot in self._cluster_spots if spot["time"] >= cutoff
+        ]
+
+    def clear_cluster_spots(self):
+        self._cluster_spots.clear()
+        self.update()
+
+    def mark_cluster_spot_worked(self, call):
+        call = str(call or "").strip().upper()
+        if not call:
+            return
+        base = call.split("/")[0]
+        changed = False
+        for spot in self._cluster_spots:
+            spot_base = str(spot.get("call") or "").upper().split("/")[0]
+            if spot_base == base and not spot["worked"]:
+                spot["worked"] = True
+                changed = True
+        if changed and self._cluster_map_enabled:
+            self.update()
+
+    def _nearest_cluster_spot(self, pos):
+        if not self._cluster_map_enabled:
+            return None
+        rect = self._map_rect()
+        if rect.isEmpty():
+            return None
+        best = None
+        best_dist = 10.0
+        for spot in self._cluster_spots:
+            try:
+                point = self._to_point(rect, spot["lat"], spot["lon"])
+            except (TypeError, ValueError):
+                continue
+            dx = point.x() - pos.x()
+            dy = point.y() - pos.y()
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best = spot
+        return best
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        spot = self._nearest_cluster_spot(event.pos())
+        if spot is not None:
+            self.cluster_spot_clicked.emit(spot["call"], spot.get("freq", ""))
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if not self._cluster_map_enabled:
+            QToolTip.hideText()
+            return
+        spot = self._nearest_cluster_spot(event.pos())
+        if spot is not None:
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"{spot['call']} ({'worked' if spot['worked'] else 'not worked'})",
+                self,
+            )
+        else:
+            QToolTip.hideText()
         self.set_my_locator(self.settings_dict.get("my-qth-locator", ""))
 
     def sizeHint(self):
@@ -237,6 +342,22 @@ class QTHMapWidget(QWidget):
                 previous_point = point
             if len(segment) >= 3:
                 painter.drawPolygon(QPolygonF(segment))
+
+    def _draw_cluster_spots(self, painter, rect):
+        if not self._cluster_map_enabled:
+            return
+        self._prune_cluster_spots()
+        for spot in self._cluster_spots:
+            try:
+                point = self._to_point(rect, spot["lat"], spot["lon"])
+            except (TypeError, ValueError):
+                continue
+            if not rect.contains(point):
+                continue
+            color = QColor(60, 200, 120) if spot["worked"] else QColor(255, 140, 0)
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.0))
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(point, 4.0, 4.0)
 
     def _draw_cities(self, painter, rect):
         center_lon, center_lat, span_lon, span_lat = self._view
@@ -472,6 +593,7 @@ class QTHMapWidget(QWidget):
         self._draw_borders(painter, rect)
         self._draw_mountains(painter, rect)
         self._draw_cities(painter, rect)
+        self._draw_cluster_spots(painter, rect)
         if self._view == (0.0, 0.0, 360.0, 180.0):
             self._draw_grid(painter, rect)
         if self._view == (0.0, 0.0, 360.0, 180.0):
@@ -553,7 +675,21 @@ class QTHMapWindow(QWidget):
             )
         self.zoom_in_button.clicked.connect(self.map.zoom_in)
         self.zoom_out_button.clicked.connect(self.map.zoom_out)
+        self.cluster_map_button = QPushButton("Cluster Map", self)
+        self.cluster_map_button.setFixedHeight(28)
+        self.cluster_map_button.setFixedWidth(96)
+        self.cluster_map_button.setStyleSheet(
+            "QPushButton { background-color: rgba(0, 0, 0, 120); color: white; "
+            "border: 2px solid rgba(255, 255, 255, 180); border-radius: 0px; "
+            "font: bold 11px; }"
+        )
+        self.cluster_map_button.clicked.connect(self._toggle_cluster_map)
         self.info = QLabel(self)
+
+    def _toggle_cluster_map(self):
+        enabled = not self.map._cluster_map_enabled
+        self.map.set_cluster_map_enabled(enabled)
+        self.cluster_map_button.setText("Cluster Map" if not enabled else "Hide Cluster")
         self.info.setWordWrap(True)
         self.info.setStyleSheet("font: 9pt; padding: 2px;")
         layout = QVBoxLayout(self)
@@ -598,6 +734,7 @@ class QTHMapWindow(QWidget):
             bottom = int(self.map.y() + map_rect.bottom())
         self.zoom_out_button.move(right - 32, bottom - 32)
         self.zoom_in_button.move(right - 32, bottom - 66)
+        self.cluster_map_button.move(right - 132, bottom - 32)
         self.zoom_in_button.raise_()
         self.zoom_out_button.raise_()
 

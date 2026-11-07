@@ -1709,6 +1709,12 @@ class Log_Window_2(QWidget):
 
         # Insert into the database first so the table row gets a real id.
         inserted_id = db.record_qso_to_base(recordObject)
+        try:
+            qth_map_window = getattr(logForm, "qth_map", None) if "logForm" in globals() else None
+            if qth_map_window is not None and hasattr(qth_map_window, "map"):
+                qth_map_window.map.mark_cluster_spot_worked(recordObject.get("CALL"))
+        except Exception:
+            pass
         if self.settings_dict['eqsl'] == 'enable' and getattr(self, 'sync_eqsl', None) is not None:
             self.sync_eqsl.target_record_id = str(inserted_id)
         row_record = dict(recordObject)
@@ -2946,6 +2952,29 @@ class LogForm(QMainWindow):
 
     def get_spots_for_current_band(self):
         return self._unlogged_spots_on_current_band()
+
+    def fill_from_map_spot(self, call, freq=""):
+        call = str(call or "").strip().upper()
+        freq = str(freq or "").strip()
+        if not call:
+            return
+        self.inputCall.setText(call)
+        if freq:
+            self.set_freq(freq)
+        self.get_info_from_qrz(call)
+        self.img_search = internetworker.internetWorker(window=internetSearch, settings=self.settings_dict)
+        self.img_search.set_callsign_for_search(callsign=call)
+        self.img_search.start()
+        if self.settings_dict.get("rigctl-enabled") == "enable":
+            try:
+                self.rigctl_set_freq_to_trx(freq)
+            except Exception:
+                pass
+        if self.settings_dict.get("tci") == "enable" and freq:
+            try:
+                tci_sndr.set_freq(freq)
+            except Exception:
+                logger.debug("Set_freq_map_spot: Can't set frequency")
 
     def fill_qso_form_from_cluster(self, qso_data):
         if qso_data is not None:
@@ -4740,6 +4769,21 @@ class TelnetCluster(QWidget):
                 color = diplom.get_color_bg()
                 search_in_diplom_rules_flag = True
 
+        try:
+            spot_call = str(spot_dict.get("call") or "").strip().upper()
+            spot_locator = locator_from_callsign(spot_call)[0] if spot_call else ""
+            worked = False
+            if spot_call and getattr(self, "db", None) is not None:
+                try:
+                    worked = bool(self.db.search_qso_in_base(spot_call))
+                except Exception:
+                    worked = False
+            qth_map_window = getattr(logForm, "qth_map", None) if "logForm" in globals() else None
+            if qth_map_window is not None and hasattr(qth_map_window, "map"):
+                qth_map_window.map.add_cluster_spot(spot_call, spot_locator, worked, spot_dict.get("freq", ""))
+        except Exception:
+            pass
+
         table.insertRow(last_row)
         table.setItem(last_row, 0, QTableWidgetItem(strftime("%H:%M:%S", localtime())))
         table.setItem(last_row, 1, QTableWidgetItem(strftime("%H:%M:%S", gmtime())))
@@ -6126,6 +6170,7 @@ if __name__ == '__main__':
         qthMap = qth_map.QTHMapWindow(settingsDict)
         logForm = LogForm(settingsDict, logSearch)
         logForm.qth_map = qthMap
+        qthMap.map.cluster_spot_clicked.connect(logForm.fill_from_map_spot)
         app_context.log_window = logWindow
         app_context.log_search = logSearch
         app_context.internet_search = internetSearch
