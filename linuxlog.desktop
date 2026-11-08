@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=LinuxLog
+Comment=Amateur radio log
+Exec=/home/sergey/PycharmProjects/linuxlog/.venv/bin/python /home/sergey/PycharmProjects/linuxlog/pythonProject/Linuxlog-2_5_2/linuxlog-2_5_1_unpacked/linuxlog-2_5_with_Ai/main.py
+Icon=/home/sergey/PycharmProjects/linuxlog/pythonProject/Linuxlog-2_5_2/linuxlog-2_5_1_unpacked/linuxlog-2_5_with_Ai/logo.png
+Type=Application
+Terminal=false
+StartupWMClass=LinuxLog
+Categories=HamRadio;Utility;
