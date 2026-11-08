@@ -45,7 +45,7 @@ class Set_connect_thread(QThread):
                 self.telnet_socket = connection
                 self.connect_socket_signal.emit(connection)
                 return
-            except (OSError, ValueError, TypeError):
+            except Exception:
                 if connection is not None:
                     try:
                         connection.close()
@@ -80,10 +80,11 @@ class RigctlMainLoop(QThread):
 
     def command_transaction(self, command):
         try:
+            self.socket.settimeout(5)
             self.socket.sendall(str(command + "\n").encode("ascii"))
             read_answer = self.socket.recv(1024)
             return bytes.decode(read_answer, self.encoding, errors="ignore").replace("\n", "")
-        except (OSError, UnicodeError):
+        except Exception:
             return False
 
 
@@ -154,20 +155,23 @@ class RigctlMainLoop(QThread):
         self.set_runing_flag(False)
 
     def run(self):
-        while self.run_flag:
-            if self.get_vfo() == False:
-                # print(f"If get vfo")
-                break
-            if self.get_frequency() == False:
-                # print(f"If get freq")
-                break
-            if self.get_mode() == False:
-                # print(f"If get mode")
-                break
-            if self.get_ptt() == False:
-                # print(f"If get mode")
-                break
-            sleep(self.sleep_time)
+        try:
+            while self.run_flag:
+                if self.get_vfo() == False:
+                    # print(f"If get vfo")
+                    break
+                if self.get_frequency() == False:
+                    # print(f"If get freq")
+                    break
+                if self.get_mode() == False:
+                    # print(f"If get mode")
+                    break
+                if self.get_ptt() == False:
+                    # print(f"If get mode")
+                    break
+                sleep(self.sleep_time)
+        except Exception:
+            pass
         self.stop_main_loop()
         if self.restart:
             self.rigctl_stop_loop_signal.emit(self)

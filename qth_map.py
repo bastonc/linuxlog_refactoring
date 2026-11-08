@@ -146,7 +146,7 @@ class QTHMapWidget(QWidget):
         if spot is not None:
             QToolTip.showText(
                 event.globalPosition().toPoint(),
-                f"{spot['call']} ({'worked' if spot['worked'] else 'not worked'})",
+                f"{spot['call']} {'(In log)' if spot['worked'] else ''}",
                 self,
             )
         else:
@@ -269,8 +269,6 @@ class QTHMapWidget(QWidget):
         return segments
 
     def _draw_land(self, painter, rect):
-        painter.setPen(QPen(self.LAND_BORDER_COLOR, 0.7))
-        painter.setBrush(QBrush(self.LAND_COLOR))
         for ring in WORLD_LAND_POLYGONS:
             # Cheap viewport culling for the denser dataset.
             if self._view != (0.0, 0.0, 360.0, 180.0):
@@ -284,6 +282,14 @@ class QTHMapWidget(QWidget):
                 if (bottom_right.x() < rect.left() or top_left.x() > rect.right()
                         or bottom_right.y() < rect.top() or top_left.y() > rect.bottom()):
                     continue
+            # Antarctic ice (and other permanent ice sheets) is drawn in white.
+            is_ice = min(point[1] for point in ring) < -60.0
+            if is_ice:
+                painter.setPen(QPen(QColor(220, 230, 245), 0.7))
+                painter.setBrush(QBrush(QColor(245, 250, 255)))
+            else:
+                painter.setPen(QPen(self.LAND_BORDER_COLOR, 0.7))
+                painter.setBrush(QBrush(self.LAND_COLOR))
             for polygon in self._land_segments(ring, rect):
                 painter.drawPolygon(polygon)
 

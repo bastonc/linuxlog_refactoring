@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import signal
 import sys
+import threading
 import logging
 
 
@@ -6139,6 +6140,29 @@ class AppEnv:
 
 if __name__ == '__main__':
     #exit(0)
+    def _global_exception_handler(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        try:
+            logger.exception("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+        except Exception:
+            pass
+
+    sys.excepthook = _global_exception_handler
+
+    def _thread_exception_handler(args):
+        try:
+            logger.exception(
+                "Uncaught exception in thread %s",
+                getattr(args.thread, "name", "?"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        except Exception:
+            pass
+
+    threading.excepthook = _thread_exception_handler
+
     APP_VERSION = '2.5.1'
     settingsDict = {}
     settingsDict.update({"APP_VERSION": APP_VERSION})
