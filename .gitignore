@@ -6,5 +6,5 @@ readme.md
 image/*
 !image/.gitkeep
 *.adi
-
+packaging/
 
