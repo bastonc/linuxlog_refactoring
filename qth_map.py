@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import QLabel, QPushButton, QSlider, QToolTip, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QPushButton, QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget
 
 from qth_locator import (
     bearing_deg,
@@ -47,13 +47,18 @@ class QTHMapWidget(QWidget):
         self.station_source = ""
         self._zoom = 1.0
         self._view = (0.0, 0.0, 360.0, 180.0)
-        self._cluster_map_enabled = False
+        self._cluster_map_enabled = (
+            (settings_dict or {}).get("cluster-map-enabled", "disable") == "enable"
+        )
         self._cluster_spots = []
+        self._last_map_rect = None
         self.setMouseTracking(True)
         self.setMinimumSize(620, 330)
 
     def set_cluster_map_enabled(self, enabled):
         self._cluster_map_enabled = bool(enabled)
+        if self.settings_dict is not None:
+            self.settings_dict["cluster-map-enabled"] = "enable" if enabled else "disable"
         self.update()
 
     def add_cluster_spot(self, call, locator, worked=False, freq=""):
@@ -111,7 +116,9 @@ class QTHMapWidget(QWidget):
     def _nearest_cluster_spot(self, pos):
         if not self._cluster_map_enabled:
             return None
-        rect = self._map_rect()
+        rect = getattr(self, "_last_map_rect", None)
+        if rect is None or rect.isEmpty():
+            rect = self._map_rect()
         if rect.isEmpty():
             return None
         best = None
@@ -146,7 +153,7 @@ class QTHMapWidget(QWidget):
         if spot is not None:
             QToolTip.showText(
                 event.globalPosition().toPoint(),
-                f"{spot['call']} ({'worked' if spot['worked'] else 'not worked'})",
+                f"{spot['call']} {'(In log)' if spot['worked'] else ''}",
                 self,
             )
         else:
@@ -269,8 +276,6 @@ class QTHMapWidget(QWidget):
         return segments
 
     def _draw_land(self, painter, rect):
-        painter.setPen(QPen(self.LAND_BORDER_COLOR, 0.7))
-        painter.setBrush(QBrush(self.LAND_COLOR))
         for ring in WORLD_LAND_POLYGONS:
             # Cheap viewport culling for the denser dataset.
             if self._view != (0.0, 0.0, 360.0, 180.0):
@@ -284,6 +289,14 @@ class QTHMapWidget(QWidget):
                 if (bottom_right.x() < rect.left() or top_left.x() > rect.right()
                         or bottom_right.y() < rect.top() or top_left.y() > rect.bottom()):
                     continue
+            # Antarctic ice (and other permanent ice sheets) is drawn in white.
+            is_ice = min(point[1] for point in ring) < -60.0
+            if is_ice:
+                painter.setPen(QPen(QColor(220, 230, 245), 0.7))
+                painter.setBrush(QBrush(QColor(245, 250, 255)))
+            else:
+                painter.setPen(QPen(self.LAND_BORDER_COLOR, 0.7))
+                painter.setBrush(QBrush(self.LAND_COLOR))
             for polygon in self._land_segments(ring, rect):
                 painter.drawPolygon(polygon)
 
@@ -582,6 +595,7 @@ class QTHMapWidget(QWidget):
         if rect.isEmpty():
             painter.end()
             return
+        self._last_map_rect = rect
 
         self._update_view(rect)
 
@@ -675,7 +689,9 @@ class QTHMapWindow(QWidget):
             )
         self.zoom_in_button.clicked.connect(self.map.zoom_in)
         self.zoom_out_button.clicked.connect(self.map.zoom_out)
-        self.cluster_map_button = QPushButton("Cluster Map", self)
+        self.cluster_map_button = QPushButton(
+            "Hide Cluster" if self.map._cluster_map_enabled else "Cluster Map", self
+        )
         self.cluster_map_button.setFixedHeight(28)
         self.cluster_map_button.setFixedWidth(96)
         self.cluster_map_button.setStyleSheet(
@@ -685,18 +701,23 @@ class QTHMapWindow(QWidget):
         )
         self.cluster_map_button.clicked.connect(self._toggle_cluster_map)
         self.info = QLabel(self)
-
-    def _toggle_cluster_map(self):
-        enabled = not self.map._cluster_map_enabled
-        self.map.set_cluster_map_enabled(enabled)
-        self.cluster_map_button.setText("Cluster Map" if not enabled else "Hide Cluster")
         self.info.setWordWrap(True)
         self.info.setStyleSheet("font: 9pt; padding: 2px;")
+        self.info.setMaximumHeight(30)
+        self.map.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
         layout.addWidget(self.map, 1)
         layout.addWidget(self.info)
+        self.refresh_my_locator()
+
+    def _toggle_cluster_map(self):
+        enabled = not self.map._cluster_map_enabled
+        self.map.set_cluster_map_enabled(enabled)
+        self.cluster_map_button.setText("Cluster Map" if not enabled else "Hide Cluster")
         self.refresh_my_locator()
 
     def refresh_my_locator(self):

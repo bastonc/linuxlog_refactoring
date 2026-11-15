@@ -329,6 +329,7 @@ class Eqsl_services(QtCore.QObject):
         self.password_input.setFixedWidth(100)
         self.password_input.setFixedHeight(30)
         self.password_input.setStyleSheet(styleform)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         password_layer = QHBoxLayout()
         password_layer.addWidget(self.password_label)
         password_layer.addWidget(self.password_input)
@@ -381,7 +382,8 @@ class Eqsl_services(QtCore.QObject):
         std.std.message(self.parrent_window, string, "<p style='color: red;'>ERROR</p>")
         if self.input_form_key == 1:
             self.settingsDict['eqsl_user'] = ''
-            self.settingsDict['eqsl_password'] = ''
+            if not config_store.is_process_env_managed('eqsl_password'):
+                self.settingsDict['eqsl_password'] = ''
         self.error_signal.emit()
 
     @QtCore.pyqtSlot()
@@ -466,10 +468,10 @@ class check_update(QThread):
         update_result = QMessageBox.question(
             self.parrent, "LinuxLog | Updater",
             f"Found new version {version} install it?",
-            buttons=QMessageBox.Yes | QMessageBox.No,
-            defaultButton=QMessageBox.Yes,
+            buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            defaultButton=QMessageBox.StandardButton.Yes,
         )
-        if update_result != QMessageBox.Yes:
+        if update_result != QMessageBox.StandardButton.Yes:
             self._finish_update_check()
             return
 
@@ -518,6 +520,9 @@ class check_update(QThread):
             current_settings = source_dir / "settings.cfg"
             if current_settings.is_file():
                 shutil.copy2(current_settings, settings_backup / current_settings.name)
+            current_env = source_dir / ".env"
+            if current_env.is_file():
+                shutil.copy2(current_env, settings_backup / current_env.name)
 
             if install_dir.is_dir():
                 backup_dir.mkdir(parents=True, exist_ok=True)
@@ -526,11 +531,17 @@ class check_update(QThread):
                 archive = backup_dir / f"linlog-{safe_version}-{timestamp}.tar.gz"
                 with tarfile.open(archive, "w:gz") as tar:
                     tar.add(install_dir, arcname=install_dir.name)
+                # The archive contains the private .env file; keep it readable
+                # only by the owner.
+                os.chmod(archive, 0o600)
 
             subprocess.run(["git", "clone", "--", repository, str(staging_dir)], check=True, timeout=300)
             for pattern in ("*.adi", "*.rules"):
                 for source in settings_backup.glob(pattern):
                     shutil.copy2(source, staging_dir / source.name)
+            env_backup = settings_backup / ".env"
+            if env_backup.is_file():
+                shutil.copy2(env_backup, staging_dir / ".env")
             self._merge_settings(staging_dir / "settings.cfg")
 
             previous_dir = home / f".linlog-previous-{os.getpid()}"
@@ -550,7 +561,11 @@ class check_update(QThread):
     def _merge_settings(self, settings_path):
         if not settings_path.is_file():
             return
-        config_store.update_settings(self.settingsDict, path=settings_path)
+        config_store.update_settings(
+            self.settingsDict,
+            path=settings_path,
+            env_file=Path(settings_path).with_name(".env"),
+        )
 
 class Clublog(QtCore.QObject):
 

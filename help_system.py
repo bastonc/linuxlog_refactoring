@@ -25,10 +25,12 @@ class Help(QMainWindow):
         # print("I a here")
         self.style_form = "background-color: " + settingsDict['form-background'] + "; color: " + settingsDict[
             'color-table'] + ";"
-        desktop = QApplication.desktop()
-        width_coordinate = (desktop.width() / 2) - 200
-        height_coordinate = (desktop.height() / 2) - 125
-        # print("hello_window: ", desktop.width(), width_coordinate)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            desktop = screen.availableGeometry()
+            width_coordinate = (desktop.width() / 2) - 200
+            height_coordinate = (desktop.height() / 2) - 125
+            self.move(int(width_coordinate), int(height_coordinate))
 
         self.setGeometry(100, 100, 500, 350)
         self.setWindowIcon(QIcon('logo.png'))
@@ -37,7 +39,7 @@ class Help(QMainWindow):
             'color'] + ";"
         self.setStyleSheet(style)
         self.v_Box_Help = QVBoxLayout()
-        self.v_Box_Help.setAlignment(Qt.AlignCenter)
+        self.v_Box_Help.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Caption label
         self.hello_label = QLabel()
         self.hello_label.setText("LinuxLog help")
@@ -49,7 +51,7 @@ class Help(QMainWindow):
         self.help_text.setText(self.fill_help_text())
         # Help image
         self.help_image = QPixmap("logo.png")
-        scaled_image = self.help_image.scaled(80, 80, Qt.KeepAspectRatio)
+        scaled_image = self.help_image.scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio)
         self.help_image_label = QLabel()
         self.help_image_label.setPixmap(scaled_image)
         self.help_text_lay.addWidget(self.help_image_label)
@@ -57,7 +59,7 @@ class Help(QMainWindow):
         self.help_text_lay.addWidget(self.help_text)
         # help form lay
         self.form_layout = QVBoxLayout()
-        self.form_layout.setAlignment(Qt.AlignCenter)
+        self.form_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.login_db_lay = QHBoxLayout()
         # label Username
         self.login_db_label = QLabel()
@@ -78,7 +80,14 @@ class Help(QMainWindow):
         self.pass_db = QLineEdit()
         self.pass_db.setFixedWidth(100)
         self.pass_db.setStyleSheet(self.style_form)
+        self.pass_db.setEchoMode(QLineEdit.EchoMode.Password)
         self.pass_db.setText(settingsDict['db-pass'])
+        if config_store.is_process_env_managed('db-pass'):
+            self.pass_db.setEnabled(False)
+            self.pass_db.setToolTip(
+                "Set by the LINUXLOG_DB_PASS environment variable; "
+                "unset it to edit this field here."
+            )
         # DataBase fields
         self.base_db_lay = QHBoxLayout()
         self.base_db_label = QLabel()
@@ -103,7 +112,7 @@ class Help(QMainWindow):
         self.host_db.setText(settingsDict['db-host'])
 
         self.form_button_lay = QHBoxLayout()
-        self.form_button_lay.setAlignment(Qt.AlignCenter)
+        self.form_button_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.apply_button = QPushButton("Check and Apply")
         self.apply_button.setFixedWidth(150)
         self.apply_button.setFixedHeight(30)
@@ -196,7 +205,7 @@ class Help(QMainWindow):
         message.setWindowTitle("Information")
         message.setText(caption)
         message.setInformativeText(text_message)
-        message.setStandardButtons(QMessageBox.Ok)
+        message.setStandardButtons(QMessageBox.StandardButton.Ok)
         message.exec()
 
 
@@ -207,4 +216,4 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         help_w = Help()
         help_w.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

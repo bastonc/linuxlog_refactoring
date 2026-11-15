@@ -210,6 +210,7 @@ class Menu (QWidget):
         self.db_pass.setFixedWidth(150)
         self.db_pass.setFixedHeight(30)
         self.db_pass.setStyleSheet(formstyle)
+        self.db_pass.setEchoMode(QLineEdit.EchoMode.Password)
 
         # DB Name (Username) DB fields
         self.db_name_label = QLabel()
@@ -282,6 +283,29 @@ class Menu (QWidget):
         self.theme_buttons_lay.addWidget(self.import_theme_button)
         self.color_lay.addLayout(self.theme_buttons_lay)
         self.color_lay.addWidget(self.window_border)
+
+        self.window_mode_label = QLabel("Window mode:")
+        self.window_mode_label.setStyleSheet(self.label_style)
+        self.window_mode_combo = QComboBox()
+        self.window_mode_combo.addItems(["Multi-window (X11/xcb)", "Single window (Wayland)"])
+        current_window_mode = self.settingsDict.get("window-mode", "xcb")
+        self.window_mode_combo.setCurrentText(
+            "Single window (Wayland)" if current_window_mode == "wayland" else "Multi-window (X11/xcb)"
+        )
+
+        self.window_layout_label = QLabel("Single-window layout:")
+        self.window_layout_label.setStyleSheet(self.label_style)
+        self.window_layout_combo = QComboBox()
+        self.window_layout_combo.addItems(["Layout 1", "Layout 2", "Layout 3"])
+        try:
+            self.window_layout_combo.setCurrentIndex(int(self.settingsDict.get("window-layout", "1")) - 1)
+        except (TypeError, ValueError):
+            self.window_layout_combo.setCurrentIndex(0)
+
+        self.color_lay.addWidget(self.window_mode_label)
+        self.color_lay.addWidget(self.window_mode_combo)
+        self.color_lay.addWidget(self.window_layout_label)
+        self.color_lay.addWidget(self.window_layout_combo)
         self.color_lay.addWidget(self.back_color_label)
         self.color_lay.addWidget(self.back_color_input)
         self.color_lay.addWidget(self.text_color_label)
@@ -600,6 +624,7 @@ class Menu (QWidget):
         self.eqsl_password = QLineEdit()
         self.eqsl_password.setFixedWidth(200)
         self.eqsl_password.setStyleSheet(formstyle)
+        self.eqsl_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.addWidget(self.eqsl_password)
         self.password.addSpacing(50)
         self.eqsl_form.addLayout(self.login)
@@ -645,6 +670,7 @@ class Menu (QWidget):
         self.clublog_pass_input.setFixedWidth(250)
         #self.clublog_pass_input.setFixedHeight(35)
         self.clublog_pass_input.setStyleSheet(formstyle)
+        self.clublog_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.clublog_pass_lay.addWidget(self.clublog_pass_label)
         self.clublog_pass_lay.addWidget(self.clublog_pass_input)
 
@@ -694,6 +720,7 @@ class Menu (QWidget):
         self.qrz_com_pass_input.setFixedWidth(250)
         # self.clublog_pass_input.setFixedHeight(35)
         self.qrz_com_pass_input.setStyleSheet(formstyle)
+        self.qrz_com_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.qrz_com_pass_lay.addWidget(self.qrz_com_pass_label)
         self.qrz_com_pass_lay.addWidget(self.qrz_com_pass_input)
 
@@ -831,7 +858,7 @@ class Menu (QWidget):
         delete_country = QAction("Delete country", context_country)
         delete_country.triggered.connect(lambda: self.country_del(index_row))
         context_country.addAction(delete_country)
-        context_country.exec_(self.country_table.mapToGlobal(point))
+        context_country.exec(self.country_table.mapToGlobal(point))
 
     def country_del(self, index_row):
         #logger.debug("delete country", index_row)
@@ -954,6 +981,30 @@ class Menu (QWidget):
         self.protocol_cat_combo.setCurrentIndex(cat_protocol_index)
         # Init country_data
         self.fill_country()
+        self._apply_env_locks()
+
+    def _apply_env_locks(self):
+        """Disable fields overridden by exported environment variables.
+
+        Values that live only in ``.env`` stay editable here; saving writes
+        them back to ``.env``.  A real exported variable cannot be changed by
+        the application, so its field is locked.
+        """
+        fields = {
+            "my-call": self.call_input,
+            "db-pass": self.db_pass,
+            "eqsl_password": self.eqsl_password,
+            "pass-clublog": self.clublog_pass_input,
+            "qrz-com-password": self.qrz_com_pass_input,
+        }
+        for key, field in fields.items():
+            env_name = config_store.env_var_for(key)
+            if env_name and config_store.is_process_env_managed(key):
+                field.setEnabled(False)
+                field.setToolTip(
+                    f"Set by the {env_name} environment variable; "
+                    "unset it to edit this field here."
+                )
 
     def closeEvent(self, e):
         calibration_thread = getattr(self, "cluster", None)
@@ -1278,6 +1329,10 @@ class Menu (QWidget):
         self.settingsDict['form-background'] = self.form_color_input.text()
         self.settingsDict['color-table'] = self.text_form_color_button.text()
         self.settingsDict['theme'] = self.theme_combo.currentText()
+        self.settingsDict['window-mode'] = (
+            "wayland" if self.window_mode_combo.currentText().startswith("Single") else "xcb"
+        )
+        self.settingsDict['window-layout'] = str(self.window_layout_combo.currentIndex() + 1)
         self.settingsDict['db-user'] = self.db_login.text().strip()
         self.settingsDict['db-pass'] = self.db_pass.text().strip()
         self.settingsDict['db-name'] = self.db_name.text().strip()

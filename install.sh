@@ -129,7 +129,37 @@ if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_]+$ || ! "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]]; the
     echo -e "${RED}Ошибка: имя базы и пользователя могут содержать только латинские буквы, цифры и _.${NC}"
     exit 1
 fi
-DB_PASS="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+
+# One stable password across reinstalls.  Precedence:
+#   1. LINUXLOG_DB_PASS exported by the user;
+#   2. the password already stored in the application's .env;
+#   3. the well-known default.
+# This keeps access to an existing database after an upgrade while still
+# letting the user choose their own password (or change it in Settings).
+DEFAULT_DB_PASS='Linuxlog12#'
+DB_PASS="${LINUXLOG_DB_PASS:-}"
+if [ -z "$DB_PASS" ] && [ -f "$INSTALL_DIR/.env" ]; then
+    DB_PASS="$(python3 - "$INSTALL_DIR/.env" <<'PY'
+from pathlib import Path
+import sys
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.lstrip().startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() == "LINUXLOG_DB_PASS":
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        print(value)
+        break
+PY
+)"
+fi
+if [ -z "$DB_PASS" ]; then
+    DB_PASS="$DEFAULT_DB_PASS"
+fi
+DB_PASS_SQL="${DB_PASS//\'/\'\'}"
 
 echo -e "${BLUE}Настройка базы данных проекта в MariaDB...${NC}"
 
@@ -140,10 +170,10 @@ CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`
     COLLATE utf8mb4_unicode_ci;
 
 CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost'
-    IDENTIFIED BY '${DB_PASS}';
+    IDENTIFIED BY '${DB_PASS_SQL}';
 
 ALTER USER '${DB_USER}'@'localhost'
-    IDENTIFIED BY '${DB_PASS}';
+    IDENTIFIED BY '${DB_PASS_SQL}';
 
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.*
     TO '${DB_USER}'@'localhost';
@@ -161,6 +191,7 @@ rsync -av \
     --exclude='.git' \
     --exclude='.idea' \
     --exclude='settings.cfg' \
+    --exclude='.env' \
     --exclude='country' \
     --exclude='*.adi' \
     --exclude='*.rules' \
@@ -177,18 +208,37 @@ for user_data_dir in image eqsl; do
     rsync -av --ignore-existing "$user_data_dir/" "$INSTALL_DIR/$user_data_dir/"
 done
 
-# Keep the application's database credentials in sync with the generated DB user.
-python3 - "$INSTALL_DIR/settings.cfg" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
+# Keep the application's database credentials in sync with the configured DB user.
+# The password is stored in a 0600 .env file instead of settings.cfg.
+python3 - "$INSTALL_DIR/settings.cfg" "$INSTALL_DIR/.env" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
 import sys
 from pathlib import Path
 
 install_dir = Path(sys.argv[1]).parent
 sys.path.insert(0, str(install_dir))
-from config_store import update_settings
+from config_store import (
+    ENV_MANAGED_SETTING_KEYS,
+    blank_settings,
+    env_file_values,
+    load_settings,
+    update_settings,
+    write_env_file,
+)
 
-update_settings({"db-name": sys.argv[2], "db-user": sys.argv[3], "db-pass": sys.argv[4]}, path=sys.argv[1])
+settings_path = sys.argv[1]
+env_path = sys.argv[2]
+settings = load_settings(path=settings_path, env_file=env_path, use_env=False)
+env_values = env_file_values(settings)
+env_values["LINUXLOG_DB_PASS"] = sys.argv[5]
+write_env_file(env_values, path=env_path)
+blank_settings(ENV_MANAGED_SETTING_KEYS, path=settings_path)
+update_settings(
+    {"db-name": sys.argv[3], "db-user": sys.argv[4]},
+    path=settings_path,
+    env_file=env_path,
+)
 PY
-chmod 600 "$INSTALL_DIR/settings.cfg"
+chmod 600 "$INSTALL_DIR/settings.cfg" "$INSTALL_DIR/.env"
 
 # 6. Создание виртуального окружения Python
 echo -e "${BLUE}[4/6] Настройка виртуального окружения (venv)...${NC}"
@@ -260,4 +310,9 @@ echo -e "${GREEN}=== Установка успешно завершена в с�
 echo "Данные для подключения Python-приложения к MariaDB:"
 echo -e "База данных: ${BLUE}${DB_NAME}${NC}"
 echo -e "Пользователь: ${BLUE}${DB_USER}${NC}"
-echo "Пароль MariaDB создан случайным образом и сохранён в settings.cfg."
+if [ "$DB_PASS" = "$DEFAULT_DB_PASS" ]; then
+    echo "Пароль MariaDB: стандартный (${DEFAULT_DB_PASS}), сохранён в .env."
+else
+    echo "Пароль MariaDB сохранён в .env (значение не выводится)."
+fi
+echo "Пароль можно изменить в окне Settings или через переменную LINUXLOG_DB_PASS."

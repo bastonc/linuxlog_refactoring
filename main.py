@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
+import math
 import signal
 import sys
+import threading
 import logging
 
 
@@ -12,7 +14,7 @@ import datetime
 import traceback
 import subprocess
 import tempfile
-import numpy as np
+
 import sounddevice as sd
 import ext
 import cat
@@ -21,13 +23,13 @@ import PyQt6.QtCore
 from PyQt6.QtWidgets import QApplication, QInputDialog, QProgressBar, QCheckBox, QMenu, QMessageBox, \
     QWidget, \
     QMainWindow, QTableWidget, QTabWidget, QTableWidgetItem, \
-    QLineEdit, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QComboBox, QPlainTextEdit, QFrame, \
+    QLineEdit, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QComboBox, QPlainTextEdit, QFrame, QScrollArea, QSplitter, QSizePolicy, \
     QDialog, QFormLayout, QDialogButtonBox
 from PyQt6.QtCore import pyqtSignal, QObject, QEvent
-from PyQt6.QtGui import QIcon, QFont, QPixmap, QColor, QAction
+from PyQt6.QtGui import QDrag, QIcon, QFont, QPixmap, QColor, QAction
 from PyQt6 import QtGui, QtCore
 from PyQt6.QtCore import Qt
-from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtCore import QMimeData, QThread, QTimer
 
 
 def SIGSEGV_signal_arises(signalNum, stack):
@@ -500,8 +502,11 @@ class Filter(QObject):
                 if settingsDict['search-internet-window'] == 'True':
 
                     self.previous_call = textCall
+                    if self.img_search.isRunning():
+                        self.img_search.wait(1000)
                     self.img_search.set_callsign_for_search(textCall)
-                    self.img_search.start()
+                    if not self.img_search.isRunning():
+                        self.img_search.start()
                     if settingsDict['tci'] == 'enable':
                         try:
                             tci_sndr.set_spot(textCall, freq)
@@ -1473,16 +1478,10 @@ class Log_Window_2(QWidget):
         # self.refresh_data()
 
     def changeEvent(self, event):
-
-        if event.type() == QtCore.QEvent.Type.WindowStateChange:
-            if self.isMinimized():
-                self.settings_dict['log-window'] = 'False'
-                # logger.debug("log-window: changeEvent:_>", self.settings_dict['log-window'])
-                # telnetCluster.showMinimized()
-            elif self.isVisible():
-                self.settings_dict['log-window'] = 'True'
-                # logger.debug("log-window: changeEvent:_>", self.settings_dict['log-window'])
-            QWidget.changeEvent(self, event)
+        # Keep window state changes local: minimizing/restoring a child
+        # window must not rewrite the application settings or affect the
+        # main window.
+        QWidget.changeEvent(self, event)
 
     def refresh_data(self):
         if self.fill_flag == 0:
@@ -1870,13 +1869,8 @@ class LogSearch(QWidget):
             self.resize(self.x - x_r, self.y - y_r)
 
     def changeEvent(self, event):
-
-        if event.type() == QtCore.QEvent.Type.WindowStateChange:
-            if self.isMinimized():
-                self.settings_dict['log-search-window'] = 'False'
-            elif self.isVisible():
-                self.settings_dict['log-search-window'] = 'True'
-            QWidget.changeEvent(self, event)
+        # Keep window state changes local.
+        QWidget.changeEvent(self, event)
 
     def overlap_qso_info(self, foundList):
         table = self.tableWidget
@@ -1991,12 +1985,12 @@ class check_update(QThread):
     def update_processing(self, update_obj):
         update_result = QMessageBox.question(self.parrent, "LinuxLog | Updater",
                                              f"Found new version {update_obj['version']} install it?",
-                                             buttons=QMessageBox.Yes | QMessageBox.No,
-                                             defaultButton=QMessageBox.Yes
+                                             buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                             defaultButton=QMessageBox.StandardButton.Yes
                                              )
-        if update_result == QMessageBox.Yes:
+        if update_result == QMessageBox.StandardButton.Yes:
             logger.debug("Start update process")
-        if update_result == QMessageBox.No:
+        if update_result == QMessageBox.StandardButton.No:
             logger.debug("Not start update process")
         self.enable_upd_button()
         logger.debug(f"Class check_upate.update_processing.\nInput: {update_obj}")
@@ -2052,7 +2046,7 @@ class About_window(QWidget):
         self.check_update.setFixedWidth(130)
         self.check_update.setFixedHeight(60)
         self.check_update.setText("> Check update <")
-        self.check_update.setStyleSheet("size: 10px;")
+        self.check_update.setStyleSheet("font-size: 10px;")
         self.check_update.clicked.connect(self.updater)
 
         # Setup layers
@@ -2962,9 +2956,21 @@ class LogForm(QMainWindow):
         if freq:
             self.set_freq(freq)
         self.get_info_from_qrz(call)
-        self.img_search = internetworker.internetWorker(window=internetSearch, settings=self.settings_dict)
+        # Do not block the GUI waiting for a previous image lookup; start a
+        # new one (or reuse) without stalling the click response.
+        if getattr(self, "img_search", None) is None or self.img_search.isRunning():
+            self.img_search = internetworker.internetWorker(window=internetSearch, settings=self.settings_dict)
         self.img_search.set_callsign_for_search(callsign=call)
-        self.img_search.start()
+        if not self.img_search.isRunning():
+            self.img_search.start()
+        # Return focus to the main form so typing can continue immediately.
+        try:
+            logForm.activateWindow()
+            logForm.raise_()
+            logForm.setFocus()
+            logForm.inputCall.setFocus()
+        except Exception:
+            pass
         if self.settings_dict.get("rigctl-enabled") == "enable":
             try:
                 self.rigctl_set_freq_to_trx(freq)
@@ -3232,6 +3238,8 @@ class LogForm(QMainWindow):
                          int(self.settings_dict['log-form-window-width']), int(self.settings_dict['log-form-window-height']))
         self.setWindowTitle(f'{self.settings_dict["my-call"]} | LinuxLog {APP_VERSION}')
         self.setWindowIcon(QIcon('logo.png'))
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+
         if self.settings_dict['border_wnd'] == "disable":
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         style = f"background-color:{self.settings_dict['background-color']}; color: {self.settings_dict['color']};"
@@ -3380,20 +3388,25 @@ class LogForm(QMainWindow):
         self.comments.setStyleSheet(styleform)
         self.comments.setPlaceholderText("Comment")
         self.comments.setFixedHeight(35)
+        self.comments.setMaximumWidth(200)
         self.country_label = QLabel()
         self.country_label.setFixedWidth(100)
         self.country_label.setStyleSheet(style + " font-size: 12px;")
         hBoxHeader = QHBoxLayout()
-        hBoxHeader.addWidget(self.labelTime)
         hBoxRst = QHBoxLayout()
         vBoxLeft = QVBoxLayout()
         vBoxRight = QVBoxLayout()
         vBoxMain = QVBoxLayout()
         # Build header line
-        hBoxHeader.addStretch(20)
+        for _header_label in (self.labelTime, self.labelVfo, self.labelFreq, self.labelMyCall):
+            _header_label.setMinimumWidth(0)
+            _header_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        hBoxHeader.addWidget(self.labelTime)
+        hBoxHeader.addSpacing(8)
         hBoxHeader.addWidget(self.labelVfo)
         hBoxHeader.addWidget(self.labelFreq)
         hBoxHeader.addWidget(self.labelMyCall)
+        hBoxHeader.addStretch(1)
 
         # Build Left block
         hCall = QHBoxLayout()
@@ -3751,6 +3764,13 @@ class LogForm(QMainWindow):
                 if self.settings_dict['telnet-cluster-window'] == 'True':
                     telnetCluster.showMinimized()
                     self.settings_dict['telnet-cluster-window'] = 'True'
+                qth_map_window = getattr(self, "qth_map", None)
+                if qth_map_window is not None and self.settings_dict.get("qth-map-window") == "True":
+                    qth_map_window.showMinimized()
+                    self.settings_dict["qth-map-window"] = "True"
+                eqsl_window = getattr(self, "eqsl_inbox_window", None)
+                if eqsl_window is not None and not eqsl_window.isHidden():
+                    eqsl_window.showMinimized()
             else:
 
                 if self.settings_dict['search-internet-window'] == 'True':
@@ -3765,10 +3785,19 @@ class LogForm(QMainWindow):
                 if self.settings_dict['telnet-cluster-window'] == 'True':
                     telnetCluster.showNormal()
                     self.settings_dict['telnet-cluster-window'] = 'True'
+                qth_map_window = getattr(self, "qth_map", None)
+                if qth_map_window is not None and self.settings_dict.get("qth-map-window") == "True":
+                    qth_map_window.showNormal()
+                    self.settings_dict["qth-map-window"] = "True"
+                eqsl_window = getattr(self, "eqsl_inbox_window", None)
+                if eqsl_window is not None and not eqsl_window.isHidden():
+                    eqsl_window.showNormal()
 
             QWidget.changeEvent(self, event)
 
     def showEvent(self, event):
+        if self.settings_dict.get("window-mode") == "wayland":
+            return
         if self.settings_dict['log-window'] == 'True':
             logWindow.showNormal()
 
@@ -3778,6 +3807,9 @@ class LogForm(QMainWindow):
             telnetCluster.showNormal()
         if self.settings_dict['search-internet-window'] == 'True':
             internetSearch.showNormal()
+        qth_map_window = getattr(self, "qth_map", None)
+        if qth_map_window is not None and self.settings_dict.get("qth-map-window") == "True":
+            qth_map_window.showNormal()
 
     def closeEvent(self, event):
         '''
@@ -3805,23 +3837,75 @@ class LogForm(QMainWindow):
             event.ignore()
             return
         self.run_time.stop_()
-        self.run_time.wait()
+        self.run_time.wait(2000)
         if self.settings_dict.get('tci') == 'enable':
-            tci_recv.stop_tci()
-        tci_sndr.close()
+            try:
+                tci_recv.stop_tci()
+            except Exception:
+                pass
+        try:
+            tci_sndr.close()
+        except Exception:
+            pass
+        if getattr(self, "rigctl_main_loop", None) is not None:
+            try:
+                self.rigctl_main_loop.set_restart_flag(False)
+                self.rigctl_main_loop.stop_main_loop()
+                self.rigctl_main_loop.wait(2000)
+            except Exception:
+                pass
+        if getattr(self, "trx", None) is not None:
+            try:
+                self.trx.socket_shutdown()
+            except Exception:
+                pass
+            self.trx = None
         self.parameter = self.get_coordinate_windows()
-        logWindow.close()
-        internetSearch.close()
-        logSearch.close()
-
-        logForm.close()
-        telnetCluster.close()
+        for _window in (logWindow, internetSearch, logSearch, telnetCluster):
+            try:
+                if hasattr(_window, "read_base_string") and _window.read_base_string.isRunning():
+                    _window.read_base_string.requestInterruption()
+                    _window.read_base_string.wait(2000)
+                _window.close()
+            except Exception:
+                pass
         map_window = getattr(self, "qth_map", None)
         if map_window is not None:
             if not map_window.isHidden():
                 map_window._preserve_visibility_on_close = True
                 self.settings_dict["qth-map-window"] = "True"
             map_window.close()
+        single_window = getattr(self, "single_window", None)
+        if single_window is not None:
+            try:
+                single_window.close()
+            except Exception:
+                pass
+        single_splitters = getattr(self, "single_splitters", None)
+        if single_splitters is not None:
+            try:
+                main_splitter, left_col, right_col = single_splitters
+                self.settings_dict["single-main-splitter-sizes"] = ",".join(str(x) for x in main_splitter.sizes())
+                self.settings_dict["single-left-splitter-sizes"] = ",".join(str(x) for x in left_col.sizes())
+                self.settings_dict["single-right-splitter-sizes"] = ",".join(str(x) for x in right_col.sizes())
+                containers = getattr(self, "single_containers", None)
+                if containers:
+                    left_names = []
+                    right_names = []
+                    for i in range(left_col.count()):
+                        w = left_col.widget(i)
+                        for nm, c in containers.items():
+                            if c is w:
+                                left_names.append(nm)
+                    for i in range(right_col.count()):
+                        w = right_col.widget(i)
+                        for nm, c in containers.items():
+                            if c is w:
+                                right_names.append(nm)
+                    self.settings_dict["single-left-order"] = ",".join(left_names)
+                    self.settings_dict["single-right-order"] = ",".join(right_names)
+            except Exception:
+                pass
         settings_file.save_all_settings(self, self.settings_dict)
         try:
             if self.cw_machine.isVisible():
@@ -4456,6 +4540,91 @@ class CW(QWidget):
         self.wpm_speed = text
 
 
+class AudioBeepEngine:
+    '''Persistent low-latency beep player.
+
+    Keeping one output stream open makes LinuxLog show up as a normal
+    application in the desktop audio mixer, so its volume can be adjusted
+    there.  Generating the samples in the audio callback (instead of calling
+    sounddevice.play for every spot) also avoids blocking the GUI thread
+    and the distortion that occurred when a browser was playing audio.
+    '''
+
+    def __init__(self, sample_rate=44100):
+        self.sample_rate = sample_rate
+        self._lock = threading.Lock()
+        self._queue = []
+        self._active_freq = 0
+        self._active_remaining = 0
+        self._phase = 0.0
+        self._stream = None
+        self._available = True
+        try:
+            self._stream = sd.OutputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                callback=self._callback,
+                blocksize=2048,
+            )
+            self._stream.start()
+        except Exception as error:
+            logger.debug(f"Audio engine unavailable: {error}")
+            self._stream = None
+            self._available = False
+
+    def _callback(self, outdata, frames, time_info, status):
+        out = outdata[:, 0]
+        try:
+            i = 0
+            with self._lock:
+                while i < frames:
+                    if self._active_remaining <= 0:
+                        if self._queue:
+                            freq, count = self._queue.pop(0)
+                            self._active_freq = freq
+                            self._active_remaining = count
+                            self._phase = 0.0
+                        else:
+                            out[i:] = 0.0
+                            self._active_freq = 0
+                            break
+                    chunk = min(frames - i, self._active_remaining)
+                    freq = self._active_freq
+                    sr = self.sample_rate
+                    phase = self._phase
+                    for j in range(chunk):
+                        out[i + j] = 0.3 * math.sin(
+                            2.0 * math.pi * freq * phase / sr
+                        )
+                        phase += 1.0
+                    self._phase = phase
+                    self._active_remaining -= chunk
+                    i += chunk
+        except Exception:
+            # Never let an exception kill the audio thread.
+            out[:] = 0.0
+
+    def beep(self, frequency, duration=0.2):
+        if not self._available or self._stream is None:
+            return False
+        with self._lock:
+            self._queue.append(
+                (int(frequency), int(self.sample_rate * duration))
+            )
+        return True
+
+    def stop(self):
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        self._available = False
+
+
 class TelnetCluster(QWidget):
     _beep_wave = None
     _BEEP_RETRY_MS = 60_000
@@ -4471,6 +4640,7 @@ class TelnetCluster(QWidget):
         self.tableWidget = QTableWidget()
         self.allRows = 0
         self.all_spots = []
+        self._worked_calls_cache = {}
         self._beep_enabled = self.settings_dict.get("cluster-beep-enabled", "enable") == "enable"
         self._beep_available = True
         self._beep_warning_shown = False
@@ -4479,6 +4649,14 @@ class TelnetCluster(QWidget):
         self._beep_filter_mode = ""
         self._beep_filter_call = ""
         self.run_cluster = ClusterThread(settings_dict=self.settings_dict, parent=self)
+        self._audio_engine = AudioBeepEngine()
+        self._last_connected_time = 0.0
+        self._cluster_watchdog = QTimer(self)
+        self._cluster_watchdog.timeout.connect(self._check_cluster_connection)
+        self._cluster_watchdog.start(5000)
+        application = QApplication.instance()
+        if application is not None:
+            application.applicationStateChanged.connect(self._on_application_state_changed)
         try:
             from services.qso_repository import QsoRepository
             self.db = QsoRepository(self.settings_dict)
@@ -4639,6 +4817,7 @@ class TelnetCluster(QWidget):
         logForm.set_telnet_wrong(text)
 
     def set_telnet_stat(self):
+        self._last_connected_time = time.monotonic()
         logForm.set_telnet_stat()
 
     def send_to_telnet_cluster(self):
@@ -4774,10 +4953,14 @@ class TelnetCluster(QWidget):
             spot_locator = locator_from_callsign(spot_call)[0] if spot_call else ""
             worked = False
             if spot_call and getattr(self, "db", None) is not None:
-                try:
-                    worked = bool(self.db.search_qso_in_base(spot_call))
-                except Exception:
-                    worked = False
+                cached = self._worked_calls_cache.get(spot_call)
+                if cached is None:
+                    try:
+                        cached = bool(self.db.search_qso_in_base(spot_call))
+                    except Exception:
+                        cached = False
+                    self._worked_calls_cache[spot_call] = cached
+                worked = cached
             qth_map_window = getattr(logForm, "qth_map", None) if "logForm" in globals() else None
             if qth_map_window is not None and hasattr(qth_map_window, "map"):
                 qth_map_window.map.add_cluster_spot(spot_call, spot_locator, worked, spot_dict.get("freq", ""))
@@ -4853,8 +5036,36 @@ class TelnetCluster(QWidget):
             self.run_cluster.wait(4000)
         self.set_telnet_wrong(text="· Telnet")
 
+    def reconnect_cluster(self):
+        '''Stop and restart the cluster connection (also used after sleep/wake).'''
+        if self.settings_dict.get("cluster-connection-enabled", "enable") != "enable":
+            return
+        self.stop_cluster()
+        # start_cluster() only starts a thread that is not already running.
+        # Reuse the existing (stopped) thread instead of creating a new one.
+        self.run_cluster._stop_requested = False
+        if not self.run_cluster.isRunning():
+            self.run_cluster.start()
+
+    def _check_cluster_connection(self):
+        if self.settings_dict.get("cluster-connection-enabled", "enable") != "enable":
+            return
+        if not self.run_cluster.isRunning():
+            self.reconnect_cluster()
+            return
+        # Reconnect if the link has been down for too long (e.g. after sleep).
+        # Ignore the initial never-connected state and let the worker retry.
+        if not self.run_cluster.get_cluster_connect_status() and self._last_connected_time > 0:
+            if time.monotonic() - self._last_connected_time > 15.0:
+                self.reconnect_cluster()
+
+    def _on_application_state_changed(self, state):
+        if state == Qt.ApplicationState.ApplicationActive:
+            self._check_cluster_connection()
+
     def closeEvent(self, event):
         self.settings_dict["cluster-beep-enabled"] = "enable" if self._beep_enabled else "disable"
+        self._audio_engine.stop()
         self.stop_cluster()
         if self.run_cluster.isRunning():
             self.run_cluster.wait(4000)
@@ -5018,6 +5229,10 @@ class TelnetCluster(QWidget):
         enabled_box = QCheckBox("Activate connection")
         enabled_box.setChecked(self.settings_dict.get("cluster-connection-enabled", "enable") == "enable")
         layout.addWidget(enabled_box)
+
+        reconnect_button = QPushButton("Reconnect")
+        reconnect_button.clicked.connect(lambda: (self.reconnect_cluster(), dialog.accept()))
+        layout.addWidget(reconnect_button)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -5203,33 +5418,21 @@ class TelnetCluster(QWidget):
             frequency = 250
         if frequency > 4000:
             frequency = 4000
-        duration = 0.2  # секунд
-        sample_rate = 44100
-        cache = self.__class__._beep_wave
-        if not isinstance(cache, dict):
-            cache = {}
-            self.__class__._beep_wave = cache
-        wave = cache.get(frequency)
-        if wave is None:
-            t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-            wave = np.sin(2 * np.pi * frequency * t)
-            cache[frequency] = wave
-        try:
-            sd.play(wave, sample_rate)
-            sd.wait()
-        except Exception as error:
+        if not self._audio_engine.beep(frequency, 0.2):
             # An unavailable/closed audio device must not crash the whole
             # application.  Pause beeps briefly and retry later while the
             # user's Beep switch stays in its current state.
             self._beep_available = False
             if not self._beep_warning_shown:
-                logger.debug(f"Cluster beep paused: {error}")
+                logger.debug("Cluster beep paused: audio device unavailable")
                 self._beep_warning_shown = True
             QTimer.singleShot(self._BEEP_RETRY_MS, self._enable_beeper)
 
     @QtCore.pyqtSlot()
     def _enable_beeper(self):
-        self._beep_available = True
+        if self._audio_engine._stream is None:
+            self._audio_engine = AudioBeepEngine()
+        self._beep_available = self._audio_engine._available
 
     @QtCore.pyqtSlot()
     def cluster_disconnected(self):
@@ -5246,9 +5449,12 @@ class TelnetCluster(QWidget):
             return
         raw_freq = freq_item.text()
         call = call_item.text()
+        if getattr(self, "img_search", None) is not None and self.img_search.isRunning():
+            self.img_search.wait(500)
         self.img_search = internetworker.internetWorker(window=internetSearch, settings=self.settings_dict)
         self.img_search.set_callsign_for_search(callsign=call)
-        self.img_search.start()
+        if not self.img_search.isRunning():
+            self.img_search.start()
         freq = std.std().std_freq(raw_freq)
         band = std.std().get_std_band(freq)
         mode = std.std().mode_band_plan(band, freq)
@@ -5264,7 +5470,13 @@ class TelnetCluster(QWidget):
         logForm.set_freq(freq)
         logForm.set_call(call=call)
         logForm.set_current_spot(spot)
-        logForm.activateWindow()
+        try:
+            logForm.activateWindow()
+            logForm.raise_()
+            logForm.setFocus()
+            logForm.inputCall.setFocus()
+        except Exception:
+            pass
 
         if self.settings_dict['tci'] == 'enable':
             try:
@@ -5320,17 +5532,8 @@ class TelnetCluster(QWidget):
         return True
 
     def changeEvent(self, event):
-
-        if event.type() == QtCore.QEvent.Type.WindowStateChange:
-            if self.isMinimized():
-                self.settings_dict['telnet-cluster-window'] = 'False'
-                logger.debug("telnet-cluster-window: changeEvent:_>", self.settings_dict['telnet-cluster-window'])
-                # telnetCluster.showMinimized()
-            elif self.isVisible():
-                self.settings_dict['telnet-cluster-window'] = 'True'
-                logger.debug("telnet-cluster-window: changeEvent:_>", self.settings_dict['telnet-cluster-window'])
-
-            QWidget.changeEvent(self, event)
+        # Keep window state changes local.
+        QWidget.changeEvent(self, event)
 
     def refresh_interface(self):
         self.setGeometry(int(self.settings_dict['telnet-cluster-window-left']),
@@ -5499,12 +5702,29 @@ class hello_window(QWidget):
         self.call_input = QLineEdit()
         self.call_input.setStyleSheet(self.style_form)
         self.call_input.setFixedWidth(150)
+
+        self.qth_locator_label = QLabel("Enter you QTH-locator (optional)")
+        self.qth_locator_label.setStyleSheet(style_text)
+        self.qth_locator_input = QLineEdit()
+        self.qth_locator_input.setStyleSheet(self.style_form)
+        self.qth_locator_input.setFixedWidth(150)
+
+        self.name_label = QLabel("You name (optional)")
+        self.name_label.setStyleSheet(style_text)
+        self.name_input = QLineEdit()
+        self.name_input.setStyleSheet(self.style_form)
+        self.name_input.setFixedWidth(150)
+
         self.ok_button = QPushButton("GO")
         self.ok_button.clicked.connect(self.ok_button_push)
         vbox = QVBoxLayout()
         vbox.addWidget(self.caption_label)
         vbox.addWidget(self.welcome_text_label)
         vbox.addWidget(self.call_input)
+        vbox.addWidget(self.qth_locator_label)
+        vbox.addWidget(self.qth_locator_input)
+        vbox.addWidget(self.name_label)
+        vbox.addWidget(self.name_input)
         vbox.addWidget(self.ok_button)
         vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -5522,12 +5742,19 @@ class hello_window(QWidget):
         db_name = str(settingsDict.get('db-name') or '').strip() or 'linuxlog'
         settingsDict['db-name'] = db_name
         settingsDict['my-call'] = callsign
+        settingsDict['my-qth-locator'] = normalize_locator(
+            self.qth_locator_input.text()
+        )
+        settingsDict['my-name'] = self.name_input.text().strip()
         try:
             database = Db(settingsDict)
             if not database.check_database(db_name):
                 database.create_database()
             if not database.check_table(callsign):
                 database.create_table(callsign, self.table_columns)
+            # Keep the callsign with the other credentials instead of
+            # writing it into settings.cfg.
+            config_store.write_env_file({"LINUXLOG_MY_CALL": callsign})
             settings_file.save_all_settings(self, settingsDict)
         except (OSError, pymysql.MySQLError, ValueError) as error:
             Messages("DB ERROR", f"Unable to set up the logbook database: {error}")
@@ -5537,7 +5764,6 @@ class hello_window(QWidget):
         _run_project_script("main.py")
         raise SystemExit(0)
 
-
 class settings_file:
 
     def save_all_settings(self, settingsDict):
@@ -5546,7 +5772,16 @@ class settings_file:
         # created by an older version of the application.
         config_store.ensure_settings({
             'my-qth-locator': settingsDict.get('my-qth-locator', ''),
+            'my-name': settingsDict.get('my-name', ''),
+            'window-mode': settingsDict.get('window-mode', 'xcb'),
+            'window-layout': settingsDict.get('window-layout', '1'),
+            'single-main-splitter-sizes': settingsDict.get('single-main-splitter-sizes', ''),
+            'single-left-splitter-sizes': settingsDict.get('single-left-splitter-sizes', ''),
+            'single-right-splitter-sizes': settingsDict.get('single-right-splitter-sizes', ''),
+            'single-left-order': settingsDict.get('single-left-order', ''),
+            'single-right-order': settingsDict.get('single-right-order', ''),
             'qth-map-window': settingsDict.get('qth-map-window', 'False'),
+            'cluster-map-enabled': settingsDict.get('cluster-map-enabled', 'disable'),
             'qth-map-window-left': settingsDict.get('qth-map-window-left', '100'),
             'qth-map-window-top': settingsDict.get('qth-map-window-top', '100'),
             'qth-map-window-width': settingsDict.get('qth-map-window-width', '900'),
@@ -5580,11 +5815,13 @@ class ReadStringDb(QThread):
                 self.parent.allRows = 0
             chunk = []
             for record in self.db.iter_all_records(0):
+                if self.isInterruptionRequested():
+                    break
                 chunk.append(record)
                 if len(chunk) >= 200:
                     self.records_from_base.emit(chunk)
                     chunk = []
-            if chunk:
+            if chunk and not self.isInterruptionRequested():
                 self.records_from_base.emit(chunk)
         finally:
             # Re-enable the table even if loading failed.
@@ -6065,7 +6302,7 @@ class Messages(QWidget):
         message.setWindowTitle("Information")
         message.setText(self.caption)
         message.setInformativeText(self.text_message)
-        message.setStandardButtons(QMessageBox.Ok)
+        message.setStandardButtons(QMessageBox.StandardButton.Ok)
         message.exec()
 
 
@@ -6079,6 +6316,29 @@ class AppEnv:
 
 if __name__ == '__main__':
     #exit(0)
+    def _global_exception_handler(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        try:
+            logger.exception("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+        except Exception:
+            pass
+
+    sys.excepthook = _global_exception_handler
+
+    def _thread_exception_handler(args):
+        try:
+            logger.exception(
+                "Uncaught exception in thread %s",
+                getattr(args.thread, "name", "?"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        except Exception:
+            pass
+
+    threading.excepthook = _thread_exception_handler
+
     APP_VERSION = '2.5.1'
     settingsDict = {}
     settingsDict.update({"APP_VERSION": APP_VERSION})
@@ -6189,6 +6449,79 @@ if __name__ == '__main__':
         telnetCluster = TelnetCluster(settingsDict)
         app_context.telnet_cluster = telnetCluster
         tci_recv = tci.tci_connect(settingsDict, log_form=logForm)
+
+        single_window_mode = settingsDict.get("window-mode") == "wayland"
+        single_window = None
+        if single_window_mode:
+            layout_choice = settingsDict.get("window-layout", "1")
+            single_window = QWidget()
+            single_window.setWindowTitle("LinuxLog")
+            single_window.setMinimumSize(900, 600)
+            style = "background-color:" + settingsDict['background-color'] + "; color:" + settingsDict['color'] + ";"
+            single_window.setStyleSheet(style)
+            outer = QHBoxLayout(single_window)
+            outer.setContentsMargins(4, 4, 4, 4)
+            outer.setSpacing(4)
+            main_splitter = QSplitter(Qt.Orientation.Horizontal)
+            left_col = QSplitter(Qt.Orientation.Vertical)
+            right_col = QSplitter(Qt.Orientation.Vertical)
+
+            widgets = {
+                "map": qthMap,
+                "form": logForm,
+                "search": logSearch,
+                "internet": internetSearch,
+                "cluster": telnetCluster,
+                "log": logWindow,
+            }
+
+            if layout_choice == "2":
+                left_order = ["form", "search", "internet", "map"]
+                right_order = ["cluster", "log"]
+            elif layout_choice == "3":
+                left_order = ["map", "internet"]
+                right_order = ["form", "search", "cluster", "log"]
+            else:
+                left_order = ["map", "form", "search", "cluster"]
+                right_order = ["internet", "log"]
+
+            for idx, name in enumerate(left_order):
+                w = widgets[name]
+                w.setParent(left_col)
+                left_col.addWidget(w)
+                w.show()
+                left_col.setStretchFactor(idx, 0 if name == "form" else 1)
+            for idx, name in enumerate(right_order):
+                w = widgets[name]
+                w.setParent(right_col)
+                right_col.addWidget(w)
+                w.show()
+                right_col.setStretchFactor(idx, 1)
+
+            main_splitter.addWidget(left_col)
+            main_splitter.addWidget(right_col)
+            main_splitter.setChildrenCollapsible(False)
+            left_col.setChildrenCollapsible(False)
+            right_col.setChildrenCollapsible(False)
+            try:
+                ms = [int(x) for x in str(settingsDict.get("single-main-splitter-sizes", "700,500")).split(",") if x.strip()]
+                ls = [int(x) for x in str(settingsDict.get("single-left-splitter-sizes", "")).split(",") if x.strip()]
+                rs = [int(x) for x in str(settingsDict.get("single-right-splitter-sizes", "")).split(",") if x.strip()]
+                if len(ms) == 2:
+                    main_splitter.setSizes(ms)
+                else:
+                    main_splitter.setSizes([700, 500])
+                if ls:
+                    left_col.setSizes(ls)
+                if rs:
+                    right_col.setSizes(rs)
+            except (TypeError, ValueError):
+                main_splitter.setSizes([700, 500])
+            outer.addWidget(main_splitter)
+            app_context.single_window = single_window
+            logForm.single_window = single_window
+            logForm.single_splitters = (main_splitter, left_col, right_col)
+
         about_window = About_window("LinuxLog",
                                     "Version: " + APP_VERSION + "<br><a href='https://github.com/bastonc/linuxlog-2_5#linuxlog----ham-logger-for-amateur-radio-station'>LinuxLog on GitHub</a><br>Baston Sergey<br>UR4LGA<br>bastonsv@gmail.com")
         env_dict = {
@@ -6209,14 +6542,13 @@ if __name__ == '__main__':
         if settingsDict['search-internet-window'] == 'True':
             # internetSearch.show()
             pass
-        if settingsDict['log-form-window'] == 'True':
-            logForm.show()
-            #
-        if settingsDict['telnet-cluster-window'] == 'True':
-            pass
-            # telnetCluster.show()
-        if settingsDict.get('qth-map-window') == 'True':
-            qthMap.show()
+        if single_window_mode:
+            single_window.show()
+        else:
+            if settingsDict['log-form-window'] == 'True':
+                logForm.show()
+            if settingsDict.get('qth-map-window') == 'True':
+                qthMap.show()
         if settingsDict['cat'] == 'enable':
             pass
             # logForm.start_cat()

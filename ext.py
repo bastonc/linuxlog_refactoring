@@ -151,7 +151,7 @@ class Diplom_form(QWidget):
         add_row = QPushButton("Add rows")
         add_row.clicked.connect(self.add_row)
         self.prefix_lay = QVBoxLayout()
-        self.prefix_lay.setAlignment(QtCore.Qt.AlignVCenter)
+        self.prefix_lay.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.prefix_lay.addWidget(self.prefix_check_box)
         self.prefix_lay.addWidget(self.sps_text)
         self.sps_layout.addLayout(self.prefix_lay)
